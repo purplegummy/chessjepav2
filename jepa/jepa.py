@@ -5,12 +5,12 @@ from jepa.categoricalbottleneck import CategoricalBottleneck
 
 
 class ChessJEPA(nn.Module):
-    def __init__(self, n_cats=32, n_codes=64, embed_dim=256, tap_layers=(2, 4, 6)):
+    def __init__(self, n_cats=8, n_codes=16, embed_dim=256, tap_layers=(2, 4, 6), dropout=0.0):
         super().__init__()
         self.tap_layers = tap_layers
-        self.encoder    = Encoder(tap_layers=tap_layers)
+        self.encoder    = Encoder(tap_layers=tap_layers, dropout=dropout)
         self.bottleneck = CategoricalBottleneck(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim)
-        self.predictor  = Predictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim)
+        self.predictor  = Predictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
 
     def forward(self, board_t, board_t1, a, tau=1.0):
         """

@@ -38,8 +38,8 @@ from jepa.head import ValueHead
 
 # The encoder is trained with these defaults; changing them requires a new ckpt.
 NUM_PATCHES: int = 64   # 8×8 board with 1×1 patch_size
-N_CATS:      int = 32   # categorical variables per patch
-N_CODES:     int = 64   # possible values per categorical variable
+N_CATS:      int = 8    # categorical variables per patch
+N_CODES:     int = 16   # possible values per categorical variable
 EMBED_DIM:   int = 256
 NUM_MOVES:   int = 4672  # total legal-ish UCI move indices in the dataset
 

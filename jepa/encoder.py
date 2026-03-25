@@ -37,37 +37,26 @@ class BoardTokenizer(nn.Module):
         
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embed_dim: int = 256, num_heads: int = 8, mlp_dim: int = 512, mlp_ratio: float = 4.0):
+    def __init__(self, embed_dim: int = 256, num_heads: int = 8, mlp_dim: int = 512, mlp_ratio: float = 4.0, dropout: float = 0.0):
         super().__init__()
 
-        self.norm1 = nn.LayerNorm(embed_dim) # pass in 16x256 embeddings
-        # multi-head attention layer, with 8 heads, each head has 256/8 = 32 dimensions, so we have 8x32 for each patch, 
-        # and we set batch_first=True to make the input and output shapes more intuitive (B, N, D)
-        # returns 16x256 output, same shape as input, but now each patch has attended to all other patches
-        self.attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
-        
-        # feed-forward network, with an intermediate dimension of 512 (4x the embed_dim), and then back down to 256, with a GELU activation in between
-        # we get back a 16x256 output, but as a unified representation of the concatenated head results
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.ffn = nn.Sequential(
             nn.Linear(embed_dim, int(embed_dim * mlp_ratio)),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(int(embed_dim * mlp_ratio), embed_dim),
         )
         self.norm2 = nn.LayerNorm(embed_dim)
+        self.drop  = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x : (B, N, D) — N tokens, D embed_dim."""
-        # Self-attention with pre-norm
         normed = self.norm1(x)
-
-        # attn returns a 16x256 output and we add it back to the original x (residual connection), so we get a new 16x256 output that has attended to all other patches, and then we pass that through the feed-forward network with another residual connection, so we get a final 16x256 output that has been processed by both the attention and the feed-forward network
-        # prevents original input from being lost 
-        x = x + self.attn(normed, normed, normed, need_weights=False)[0]
-
-        normed2 = self.norm2(x) # normalize again as values from attention can be overly large, so we normalize again before passing through the feed-forward network to prevent instability
-        # Feed-forward with pre-norm
-        # another residual connection
-        x = x + self.ffn(normed2)
+        x = x + self.drop(self.attn(normed, normed, normed, need_weights=False)[0])
+        normed2 = self.norm2(x)
+        x = x + self.drop(self.ffn(normed2))
         return x
 
 # Here we use patch size = 1 but in the comments we us e patch size = 2 for easier understanding, but the code works for any patch size as long as it divides the board size evenly
@@ -101,7 +90,7 @@ class Encoder(nn.Module):
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
         self.layers = nn.ModuleList([
-            TransformerBlock(embed_dim, num_heads, mlp_ratio=mlp_ratio)
+            TransformerBlock(embed_dim, num_heads, mlp_ratio=mlp_ratio, dropout=dropout)
             for _ in range(depth)
         ])
 

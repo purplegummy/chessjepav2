@@ -26,7 +26,7 @@ def save_checkpoint(model: ChessJEPA, optimizer: torch.optim.Optimizer, epoch: i
     logging.info(f"Saved checkpoint to {out_path}")
 
 
-LAMBDA = 0.1
+LAMBDA = 0.01
 def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, torch.Tensor], criterion: torch.nn.CrossEntropyLoss) -> torch.Tensor:
     l_pred = 0.0
     for level in pred_logits:
@@ -50,7 +50,7 @@ def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, to
 
         # 2. Average over Batch and Heads/Time to get global usage
         # Resulting shape: (n_cats=32, n_codes=64)
-        avg_dist = probs.mean(dim=(0, 1)) 
+        avg_dist = probs.mean(dim=(0, 1))
 
         # 3. Compute Entropy per category across the 64 codes
         # We sum over dim=1 (the 64 codes)
@@ -90,7 +90,7 @@ def log_model_info(model: ChessJEPA, device: torch.device):
 
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ChessJEPA().to(device)
+    model = ChessJEPA(dropout=args.dropout).to(device)
     log_model_info(model, device)
 
     dataset = ChessDataset(args.data)
@@ -102,9 +102,12 @@ def main(args):
     val_loader   = torch.utils.data.DataLoader(val_dataset,   batch_size=args.batch, shuffle=False, num_workers=4, pin_memory=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    # linear warmup over args.warmup steps, then hold at args.lr
-    scheduler = torch.optim.lr_scheduler.LinearLR(
+    total_steps = args.epochs * (train_size // args.batch)
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup
+    )
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps - args.warmup, eta_min=1e-6
     )
     criterion = torch.nn.CrossEntropyLoss()
     global_step = 0
@@ -116,13 +119,19 @@ def main(args):
             board_t1 = data["next_state"].to(device)
             actions  = data["action"].to(device)
 
+            # anneal tau from 1.0 → 0.1 over all training steps
+            tau = max(0.1, 1.0 - 0.9 * (global_step / total_steps))
+
             optimizer.zero_grad()
-            pred_logits, target_indices = model(board_t, board_t1, actions, tau=1.0)
+            pred_logits, target_indices = model(board_t, board_t1, actions, tau=tau)
             loss, l_pred, l_entropy = calc_loss(pred_logits, target_indices, criterion)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             if global_step < args.warmup:
-                scheduler.step()
+                warmup_scheduler.step()
+            else:
+                cosine_scheduler.step()
             global_step += 1
 
             if batch_idx % 100 == 0:
@@ -142,6 +151,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch",   default=512,                         type=int)
     parser.add_argument("--lr",      default=3e-4,                        type=float)
     parser.add_argument("--warmup",  default=1000,                        type=int)
+    parser.add_argument("--dropout", default=0.1,                         type=float)
     parser.add_argument("--data",    default="data/dataset.pt")
     parser.add_argument("--out",     default="checkpoints/checkpoint.pt")
     parser.add_argument("--epochs",  default=10,                          type=int)

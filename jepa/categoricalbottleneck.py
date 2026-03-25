@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch
 class CategoricalBottleneck(nn.Module):
-    def __init__(self, n_cats: int = 32, n_codes: int = 64, embed_dim: int = 256):
+    def __init__(self, n_cats: int = 8, n_codes: int = 16, embed_dim: int = 256):
         super().__init__()
         self.n_cats = n_cats
         self.n_codes = n_codes

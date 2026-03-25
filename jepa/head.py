@@ -18,7 +18,7 @@ import torch.nn as nn
 
 
 class ValueHead(nn.Module):
-    def __init__(self, n_cats: int = 32, n_codes: int = 64, hidden_dim: int = 512):
+    def __init__(self, n_cats: int = 8, n_codes: int = 16, hidden_dim: int = 512):
         super().__init__()
         in_dim = n_cats * n_codes  # 2048
 

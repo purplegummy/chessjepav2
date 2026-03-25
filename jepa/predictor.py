@@ -4,21 +4,20 @@ from jepa.encoder import TransformerBlock
 
 class Predictor(nn.Module):
     def __init__(
-            
-            self, n_cats: int = 32, 
-            n_codes: int = 64, 
-            embed_dim: int = 256, num_heads: int = 8, 
-            mlp_ratio: float = 4.0, 
-            depth: int = 6, num_moves: int = 4672
-            
+            self, n_cats: int = 8,
+            n_codes: int = 16,
+            embed_dim: int = 256, num_heads: int = 8,
+            mlp_ratio: float = 4.0,
+            depth: int = 6, num_moves: int = 4672,
+            dropout: float = 0.0,
             ):
-        
+
         super().__init__()
         self.action_encoder = nn.Embedding(num_moves, embed_dim)
 
         self.input_proj = nn.Linear(n_cats * n_codes, embed_dim)
         self.layers = nn.ModuleList([
-            TransformerBlock(embed_dim, num_heads, mlp_ratio=mlp_ratio)
+            TransformerBlock(embed_dim, num_heads, mlp_ratio=mlp_ratio, dropout=dropout)
             for _ in range(depth)
         ])
         self.output_proj = nn.Linear(embed_dim, n_cats * n_codes)

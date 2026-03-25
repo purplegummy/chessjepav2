@@ -33,8 +33,8 @@ logging.basicConfig(
 )
 
 BOTTLENECK_TAU = 1e-5   # near-deterministic during inference / value training
-N_CATS  = 32
-N_CODES = 64
+N_CATS  = 8
+N_CODES = 16
 
 
 def encode_batch(encoder, bottleneck, board, device):
