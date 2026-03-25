@@ -26,7 +26,7 @@ def save_checkpoint(model: ChessJEPA, optimizer: torch.optim.Optimizer, epoch: i
     logging.info(f"Saved checkpoint to {out_path}")
 
 
-LAMBDA = 0.1
+LAMBDA = 0.01
 def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, torch.Tensor], criterion: torch.nn.CrossEntropyLoss) -> torch.Tensor:
     l_pred = 0.0
     for level in pred_logits:
@@ -45,10 +45,11 @@ def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, to
     for level in pred_logits:
         probs = torch.softmax(pred_logits[level], dim=-1)  # (B, 16, n_cats, n_codes)
         avg_dist = probs.mean(dim=(0, 1))                  # (n_cats, n_codes)
-        # Calculate the entropy of the average distribution
-        # we want to maximize entropy so we use negative entropy as a loss (since we minimize the loss, minimizing negative entropy is equivalent to maximizing entropy)
-        entropy = -torch.sum(avg_dist * torch.log(avg_dist + 1e-8))  # Add small value to prevent log(0)
+        # normalise by n_cats so scale is independent of codebook size
+        entropy = -torch.sum(avg_dist * torch.log(avg_dist + 1e-8)) / avg_dist.shape[0]
         l_entropy -= entropy
+
+    l_entropy /= len(pred_logits)
 
     return l_pred + LAMBDA * l_entropy, l_pred, l_entropy
 
@@ -75,8 +76,8 @@ def main(args):
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch, shuffle=True)
-    val_loader   = torch.utils.data.DataLoader(val_dataset,   batch_size=args.batch, shuffle=False)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch, shuffle=True,  num_workers=4, pin_memory=True)
+    val_loader   = torch.utils.data.DataLoader(val_dataset,   batch_size=args.batch, shuffle=False, num_workers=4, pin_memory=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     # linear warmup over args.warmup steps, then hold at args.lr
