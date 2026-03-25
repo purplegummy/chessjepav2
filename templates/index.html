@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ChessJEPA</title>
+<link rel="stylesheet" href="/static/chessboard.min.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ── Left: board ──────────────────────────────────────────────────── -->
+  <div class="board-panel">
+
+    <div class="board-header">
+      <span class="logo">♟ ChessJEPA</span>
+      <span id="thinkingDot" class="thinking-dot"></span>
+    </div>
+
+    <div id="board"></div>
+
+    <div class="board-footer">
+      <input id="fenInput" class="fen-input" readonly placeholder="FEN will appear here">
+    </div>
+
+    <div class="board-buttons">
+      <button id="newGameBtn"   class="btn btn-primary">New Game</button>
+      <button id="takeBackBtn"  class="btn btn-secondary">↩ Take Back</button>
+      <button id="flipBoardBtn" class="btn btn-secondary">⇅ Flip</button>
+    </div>
+
+  </div>
+
+  <!-- ── Right: settings + analysis ──────────────────────────────────── -->
+  <div class="side-panel">
+
+    <!-- Status card -->
+    <div id="statusCard" class="status-card your-turn">
+      <div class="status-left">
+        <span id="statusIcon"  class="status-icon">♟</span>
+        <div>
+          <div id="statusTitle" class="status-title">Your Turn</div>
+          <div id="statusSub"   class="status-sub">White to move</div>
+        </div>
+      </div>
+      <span id="statusBadge" class="status-badge badge-playing">Playing</span>
+    </div>
+
+    <!-- Color + hints -->
+    <div class="section-label">Play as</div>
+    <div id="colorToggle" class="toggle-group">
+      <button class="toggle-btn active" data-color="white">♔ White</button>
+      <button class="toggle-btn"        data-color="black">♚ Black</button>
+    </div>
+    <div class="hints-row">
+      <label class="hints-label" for="hintsToggle">Show legal move hints</label>
+      <input id="hintsToggle" type="checkbox" checked>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- ── Goal ─────────────────────────────────────────────────────── -->
+    <div class="section-label">Planner Goal</div>
+
+    <div class="goal-info">
+      The planner encodes a <strong>goal board</strong> into latent space and uses
+      CEM to find moves that minimise the latent distance to that goal.
+    </div>
+
+    <select id="goalType" class="select-input">
+      <option value="king_capture">Capture opponent's king (default)</option>
+      <option value="piece_capture">Capture a specific piece</option>
+      <option value="target_fen">Target FEN position</option>
+      <option value="preset">Preset position</option>
+    </select>
+
+    <!-- Piece capture options (shown when piece_capture selected) -->
+    <div id="pieceCaptureOpts" class="goal-extra" style="display:none">
+      <select id="captureTarget" class="select-input">
+        <option value="q">Queen</option>
+        <option value="r">Rook</option>
+        <option value="b">Bishop</option>
+        <option value="n">Knight</option>
+        <option value="p">Pawn</option>
+      </select>
+    </div>
+
+    <!-- Target FEN (shown when target_fen selected) -->
+    <div id="targetFenOpts" class="goal-extra" style="display:none">
+      <input id="targetFen" class="fen-input" style="background:#0f0f1e;color:#e0e0e0;"
+             placeholder="Paste goal FEN here…">
+    </div>
+
+    <!-- Preset (shown when preset selected) -->
+    <div id="presetOpts" class="goal-extra" style="display:none">
+      <select id="presetFen" class="select-input">
+        <option value="r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4">Scholar's mate</option>
+        <option value="8/8/8/3k4/8/3K4/8/3Q4 w - - 0 1">Queen vs lone king</option>
+        <option value="1K1k4/1P6/8/8/8/8/r7/2R5 w - - 0 1">Lucena rook endgame</option>
+        <option value="4k3/8/8/4Pp2/8/8/8/4K2R w - f6 0 1">Philidor endgame</option>
+      </select>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- ── CEM parameters ────────────────────────────────────────────── -->
+    <div class="section-label">CEM Parameters</div>
+
+    <div class="sliders">
+
+      <div class="slider-row">
+        <label>Horizon <span class="slider-hint">how many moves ahead</span></label>
+        <div class="slider-right">
+          <input type="range" id="sliderHorizon" min="1" max="8" value="3">
+          <span id="valHorizon" class="slider-val">3</span>
+        </div>
+      </div>
+
+      <div class="slider-row">
+        <label>Samples <span class="slider-hint">action seqs per iter</span></label>
+        <div class="slider-right">
+          <input type="range" id="sliderSamples" min="8" max="256" step="8" value="64">
+          <span id="valSamples" class="slider-val">64</span>
+        </div>
+      </div>
+
+      <div class="slider-row">
+        <label>Elites <span class="slider-hint">top-K kept each iter</span></label>
+        <div class="slider-right">
+          <input type="range" id="sliderElites" min="2" max="32" value="8">
+          <span id="valElites" class="slider-val">8</span>
+        </div>
+      </div>
+
+      <div class="slider-row">
+        <label>Iterations <span class="slider-hint">CEM refinement rounds</span></label>
+        <div class="slider-right">
+          <input type="range" id="sliderIters" min="1" max="20" value="10">
+          <span id="valIters" class="slider-val">10</span>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- ── JEPA Analysis ─────────────────────────────────────────────── -->
+    <div class="section-label">JEPA Analysis</div>
+
+    <div class="analysis-card">
+      <div class="analysis-row">
+        <span class="analysis-label">Best move</span>
+        <span id="bestMoveSan" class="analysis-value best-move">—</span>
+      </div>
+      <div class="analysis-row">
+        <span class="analysis-label">Confidence</span>
+        <span id="confidencePct" class="analysis-value">—</span>
+      </div>
+      <div class="conf-bar-bg">
+        <div id="confidenceBar" class="conf-bar-fill" style="width:0%"></div>
+      </div>
+      <div class="analysis-row">
+        <span class="analysis-label">Latent value</span>
+        <span id="predValue" class="analysis-value">—</span>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-top:14px">Top moves</div>
+    <div id="topMovesList" class="top-moves-list"></div>
+
+    <div class="divider"></div>
+
+    <!-- Move history -->
+    <div class="section-label">Move History</div>
+    <div id="moveHistory" class="move-history">
+      <span class="history-empty">No moves yet</span>
+    </div>
+
+  </div>
+</div>
+
+<script src="/static/jquery.min.js"></script>
+<script src="/static/chessboard.min.js"></script>
+<script src="/static/chess.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -22,6 +22,7 @@ python3 -m util.dataset --pgn data/games.pgn --out data/dataset.pt
 ## Training
 
 ```bash
+mkdir checkpoints
 python3 -m train --data data/dataset.pt --epochs 10 --batch 64
 ```
 
