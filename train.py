@@ -26,7 +26,7 @@ def save_checkpoint(model: ChessJEPA, optimizer: torch.optim.Optimizer, epoch: i
     logging.info(f"Saved checkpoint to {out_path}")
 
 
-LAMBDA = 0.01
+LAMBDA = 0.1
 def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, torch.Tensor], criterion: torch.nn.CrossEntropyLoss) -> torch.Tensor:
     l_pred = 0.0
     for level in pred_logits:
@@ -40,17 +40,29 @@ def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, to
     
     l_pred /= len(pred_logits)  # average over the different tap levels
 
-    l_entropy = 0.0  # Initialize entropy loss
+    l_entropy = 0.0
+    n_levels = len(pred_logits)
 
     for level in pred_logits:
-        probs = torch.softmax(pred_logits[level], dim=-1)  # (B, 16, n_cats, n_codes)
-        avg_dist = probs.mean(dim=(0, 1))                  # (n_cats, n_codes)
-        # normalise by n_cats so scale is independent of codebook size
-        entropy = -torch.sum(avg_dist * torch.log(avg_dist + 1e-8)) / avg_dist.shape[0]
-        l_entropy -= entropy
+        # 1. Softmax over the 64 CODES (dim=-1)
+        # This makes each category a probability distribution over the board positions
+        probs = torch.softmax(pred_logits[level], dim=-1) # (B, 16, 32, 64)
 
-    l_entropy /= len(pred_logits)
+        # 2. Average over Batch and Heads/Time to get global usage
+        # Resulting shape: (n_cats=32, n_codes=64)
+        avg_dist = probs.mean(dim=(0, 1)) 
 
+        # 3. Compute Entropy per category across the 64 codes
+        # We sum over dim=1 (the 64 codes)
+        eps = 1e-8
+        entropy_per_cat = -torch.sum(avg_dist * torch.log(avg_dist + eps), dim=1)
+
+        # 4. Average the entropies of all 32 categories
+        # This keeps the value independent of the number of categories
+        l_entropy -= entropy_per_cat.mean()
+
+    # 5. Final average over levels
+    l_entropy /= n_levels
     return l_pred + LAMBDA * l_entropy, l_pred, l_entropy
 
 def validate(model: ChessJEPA, dataloader, criterion, device) -> float:
