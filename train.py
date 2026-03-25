@@ -78,8 +78,13 @@ def main(args):
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch, shuffle=True)
     val_loader   = torch.utils.data.DataLoader(val_dataset,   batch_size=args.batch, shuffle=False)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # linear warmup over args.warmup steps, then hold at args.lr
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup
+    )
     criterion = torch.nn.CrossEntropyLoss()
+    global_step = 0
 
     for epoch in range(args.epochs):
         model.train()
@@ -93,6 +98,9 @@ def main(args):
             loss, l_pred, l_entropy = calc_loss(pred_logits, target_indices, criterion)
             loss.backward()
             optimizer.step()
+            if global_step < args.warmup:
+                scheduler.step()
+            global_step += 1
 
             if batch_idx % 100 == 0:
                 log_step(epoch, batch_idx, loss.item(), l_pred.item(), l_entropy.item())
@@ -106,7 +114,9 @@ def main(args):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch",   default=64,                          type=int)
+    parser.add_argument("--batch",   default=512,                         type=int)
+    parser.add_argument("--lr",      default=3e-4,                        type=float)
+    parser.add_argument("--warmup",  default=1000,                        type=int)
     parser.add_argument("--data",    default="data/dataset.pt")
     parser.add_argument("--out",     default="checkpoints/checkpoint.pt")
     parser.add_argument("--epochs",  default=10,                          type=int)
