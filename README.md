@@ -6,7 +6,7 @@ A JEPA (Joint Embedding Predictive Architecture) for chess, using a transformer 
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
-pip install torch chess
+pip install -r requirements.txt
 ```
 
 ## Data
