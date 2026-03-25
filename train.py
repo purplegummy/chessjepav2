@@ -26,7 +26,7 @@ def save_checkpoint(model: ChessJEPA, optimizer: torch.optim.Optimizer, epoch: i
     logging.info(f"Saved checkpoint to {out_path}")
 
 
-LAMBDA = 0.01
+LAMBDA = 0.05
 def calc_loss(pred_logits: dict[int, torch.Tensor], target_indices: dict[int, torch.Tensor], criterion: torch.nn.CrossEntropyLoss) -> torch.Tensor:
     l_pred = 0.0
     for level in pred_logits:
