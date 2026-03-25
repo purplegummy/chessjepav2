@@ -67,9 +67,19 @@ def validate(model: ChessJEPA, dataloader, criterion, device) -> float:
     return total_loss / len(dataloader)
 
 
+def log_model_info(model: ChessJEPA, device: torch.device):
+    total  = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logging.info(f"device:         {device}")
+    logging.info(f"total params:   {total:,}")
+    logging.info(f"trainable:      {trainable:,}")
+    logging.info(f"GPUs available: {torch.cuda.device_count()}")
+
+
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ChessJEPA().to(device)
+    log_model_info(model, device)
 
     dataset = ChessDataset(args.data)
     val_size  = int(0.1 * len(dataset))
@@ -109,8 +119,7 @@ def main(args):
         val_loss = validate(model, val_loader, criterion, device)
         logging.info(f"epoch {epoch:>3} | val_loss {val_loss:.4f}")
 
-        if epoch % 5 == 0:
-            save_checkpoint(model, optimizer, epoch, args.out.replace(".pt", f"_epoch{epoch}.pt"))
+        save_checkpoint(model, optimizer, epoch, args.out.replace(".pt", f"_epoch{epoch}.pt"))
 
 if __name__ == "__main__":
     import argparse
