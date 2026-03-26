@@ -92,12 +92,6 @@ def main(args):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     total_steps = args.epochs * (train_size // args.batch)
-    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup
-    )
-    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=total_steps - args.warmup, eta_min=1e-6
-    )
     criterion = torch.nn.CrossEntropyLoss()
     global_step = 0
     start_epoch = 0
@@ -108,12 +102,16 @@ def main(args):
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
         global_step = start_epoch * (train_size // args.batch)
-        # fast-forward schedulers to the correct step
-        for _ in range(min(global_step, args.warmup)):
-            warmup_scheduler.step()
-        for _ in range(max(0, global_step - args.warmup)):
-            cosine_scheduler.step()
         logging.info(f"Resumed from {args.resume} at epoch {start_epoch}, step {global_step}")
+
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup,
+        last_epoch=min(global_step, args.warmup) - 1,
+    )
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_steps - args.warmup, eta_min=1e-6,
+        last_epoch=max(0, global_step - args.warmup) - 1,
+    )
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
