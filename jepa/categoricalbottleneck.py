@@ -1,29 +1,51 @@
 import torch.nn as nn
 import torch
 class CategoricalBottleneck(nn.Module):
-    def __init__(self, n_cats: int = 8, n_codes: int = 16, embed_dim: int = 256):
+    def __init__(self, n_cats: int = 8, n_codes: int = 16, embed_dim: int = 256, dead_code_threshold: float = 0.01):
         super().__init__()
         self.n_cats = n_cats
         self.n_codes = n_codes
+        self.dead_code_threshold = dead_code_threshold
         # we will project the input embedding into a space of n_cats * n_codes dimensions
         self.proj = nn.Linear(embed_dim, n_cats * n_codes)
+        # EMA usage tracker: counts average usage per code across categories (n_cats, n_codes)
+        self.register_buffer("ema_usage", torch.ones(n_cats, n_codes) / n_codes)
+
+    @torch.no_grad()
+    def _reset_dead_codes(self, logits: torch.Tensor):
+        # logits: (B, N, n_cats, n_codes)
+        # compute per-code usage frequency averaged over batch and positions
+        probs = torch.softmax(logits.detach(), dim=-1)  # (B, N, n_cats, n_codes)
+        avg = probs.mean(dim=(0, 1))                    # (n_cats, n_codes)
+        self.ema_usage.mul_(0.99).add_(avg.mul(0.01))
+
+        dead = self.ema_usage < self.dead_code_threshold  # (n_cats, n_codes)
+        n_dead = dead.sum().item()
+        if n_dead > 0:
+            # reinitialize dead code weights with gaussian noise around current mean weight
+            weight = self.proj.weight  # (n_cats*n_codes, embed_dim)
+            weight_2d = weight.view(self.n_cats, self.n_codes, -1)
+            for cat_idx in range(self.n_cats):
+                dead_codes = dead[cat_idx].nonzero(as_tuple=True)[0]
+                if len(dead_codes) == 0:
+                    continue
+                alive_codes = (~dead[cat_idx]).nonzero(as_tuple=True)[0]
+                if len(alive_codes) == 0:
+                    continue
+                # sample alive codes to copy from (with noise)
+                src = alive_codes[torch.randint(len(alive_codes), (len(dead_codes),))]
+                noise = torch.randn_like(weight_2d[cat_idx, src]) * 0.01
+                weight_2d[cat_idx, dead_codes] = weight_2d[cat_idx, src] + noise
+
     def forward(self, x: torch.Tensor, tau: float = 1.0):
         # x: (B, N, embed_dim)
         B, N, _ = x.shape
-        # if we have a 16x256 input, we will project it to 16x(32*64) = 16x2048, and then we will reshape it to 16x32x64, where we have 32 categorical variables, each with 64 possible values (one-hot encoded)
         logits = self.proj(x).view(B, N, self.n_cats, self.n_codes)
-        # straight-through Gumbel-softmax
 
-        # gumbel adds noise to logits to encourage exploration (so the highest logit doesnt get stuck as the argmax), then scale by tau 
+        if self.training:
+            self._reset_dead_codes(logits)
 
-        #soft is the differentiable version of the categorical distribution, where we get a probability distribution over the n_codes for each of the n_cats, and we can backprop through this to learn the parameters of the projection layer
         soft = nn.functional.gumbel_softmax(logits, tau=tau, hard=False)
-
-        # hard is the non-differentiable version (since it is a step function), where we take the argmax to get a one-hot encoding of the categorical variables (1 for highest logit in each category); used for forward pass
         hard = nn.functional.gumbel_softmax(logits, tau=tau, hard=True)
-
-        # gradient flows through soft since hard has zero grad and soft.detach() has zero grad,
-        # allows for hard to be used in the forward pass, while still allowing for gradients to flow through soft for learning the parameters of the projection layer
         z = hard - soft.detach() + soft  # straight-through estimator
-        # return one hot encoding and logits for loss calculation; z is the output of the bottleneck, which is a one-hot encoding of the categorical variables, and logits can be used to calculate a loss (e.g. cross-entropy)
-        return z, logits  # z: (B, N, n_cats, n_codes)  
+        return z, logits  # z: (B, N, n_cats, n_codes)

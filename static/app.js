@@ -6,8 +6,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let playerColor   = 'white';   // 'white' or 'black'
     let selectedSq    = null;
     let hintsOn       = true;
-    let aiPending     = false;
-    let lastAiMove    = null;       // {from, to} for highlight
+    let aiPending        = false;
+    let lastAiMove       = null;    // {from, to} for highlight
+    let stockfishEnabled = false;
 
     // ── Slider live-value display ────────────────────────────────────────────
     ['Horizon','Samples','Elites','Iters'].forEach(name => {
@@ -125,7 +126,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const resp = await fetch('/api/best_move', {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ fen: game.fen(), top_n: 5, ...getPlannerSettings() }),
+                body:    JSON.stringify({ fen: game.fen(), top_n: 5, stockfish_opponent: stockfishEnabled, ...getPlannerSettings() }),
             });
 
             if (!resp.ok) throw new Error(`Server error ${resp.status}`);
@@ -338,6 +339,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('hintsToggle').addEventListener('change', e => {
         hintsOn = e.target.checked;
         if (!hintsOn) clearHighlights();
+    });
+
+    document.getElementById('stockfishBtn').addEventListener('click', () => {
+        stockfishEnabled = !stockfishEnabled;
+        const btn = document.getElementById('stockfishBtn');
+        btn.textContent = `🐟 Stockfish: ${stockfishEnabled ? 'On' : 'Off'}`;
+        btn.classList.toggle('btn-active', stockfishEnabled);
     });
 
     // ── Init ─────────────────────────────────────────────────────────────────

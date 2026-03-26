@@ -25,11 +25,13 @@ action sequences and iteratively refines it:
 Used as MPC: only the *first* action of the plan is executed, then re-plan.
 """
 
+import chess
 import torch
 import torch.nn.functional as F
 
 from jepa.jepa import ChessJEPA
 from jepa.head import ValueHead
+from util.parse import index_to_move, move_to_index
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +166,7 @@ def rollout(
     bottleneck,
     z_init: torch.Tensor,
     action_sequence: torch.Tensor,
+    board: chess.Board | None = None,
 ) -> torch.Tensor:
     """
     Autoregressively predict the latent state H steps into the future.
@@ -193,23 +196,50 @@ def rollout(
     (typically H ≤ 5-10) to limit drift.
     """
     z = z_init                              # (1, 64, 32, 64)
-    horizon = action_sequence.shape[0]
+    n_model_actions = action_sequence.shape[0]
+    # total horizon = model steps + opponent steps interleaved
+    # step 0 = model, step 1 = opponent, step 2 = model, ...
+    total_steps = n_model_actions * 2 - 1
+    model_step  = 0
+
+    # Track real board to get exact legal moves at each opponent step.
+    sim_board = board.copy() if board is not None else None
 
     with torch.no_grad():
-        for t in range(horizon):
-            # Predictor expects action as (B,) long tensor.
-            a_t = action_sequence[t].unsqueeze(0)   # (1,)
+        for t in range(total_steps):
+            if t % 2 == 0:
+                # Model's turn — use CEM-chosen action
+                a_t = action_sequence[model_step].unsqueeze(0)   # (1,)
+                if sim_board is not None:
+                    try:
+                        move = index_to_move(a_t.item(), sim_board)
+                        if move in sim_board.legal_moves:
+                            sim_board.push(move)
+                        else:
+                            sim_board = None   # move was invalid; stop tracking
+                    except Exception:
+                        sim_board = None
+                model_step += 1
+            else:
+                # Opponent's turn — use real legal moves if board is still tracked
+                if sim_board is not None and not sim_board.is_game_over():
+                    legal = list(sim_board.legal_moves)
+                    opp_move = legal[torch.randint(0, len(legal), (1,)).item()]
+                    try:
+                        a_t = torch.tensor(
+                            [move_to_index(opp_move, sim_board)],
+                            dtype=torch.long, device=z.device,
+                        )
+                        sim_board.push(opp_move)
+                    except Exception:
+                        a_t = torch.randint(0, NUM_MOVES, (1,), device=z.device)
+                        sim_board = None
+                else:
+                    a_t = torch.randint(0, NUM_MOVES, (1,), device=z.device)
 
-            # Predictor returns *logits* (B, 64, 32, 64), not one-hots.
-            # We must convert back to a hard one-hot so the *next* predictor
-            # call receives the same format as training (z was always one-hot).
-            logits = predictor(z, a_t)              # (1, 64, 32, 64) logits
-
-            # argmax over the n_codes dimension gives the winning code index.
-            indices = logits.argmax(dim=-1)         # (1, 64, 32)
-
-            # Convert indices to one-hot so shape stays (1, 64, 32, 64).
-            z = F.one_hot(indices, num_classes=N_CODES).float()  # (1,64,32,64)
+            logits  = predictor(z, a_t)
+            indices = logits.argmax(dim=-1)
+            z = F.one_hot(indices, num_classes=N_CODES).float()
 
     return z     # z_H: predicted latent state at horizon H
 
@@ -261,6 +291,7 @@ def cem_planner(
     config: dict,
     value_head=None,
     obs_goal: torch.Tensor | None = None,
+    board: chess.Board | None = None,
 ) -> int:
     """
     Find the best first move using CEM with a categorical distribution over
@@ -333,7 +364,7 @@ def cem_planner(
             # ----------------------------------------------------------
             costs = torch.zeros(n_samples, device=device)
             for i in range(n_samples):
-                z_H = rollout(predictor, bottleneck, z_init, samples_int[i])
+                z_H = rollout(predictor, bottleneck, z_init, samples_int[i], board=board)
                 costs[i] = score_terminal(z_H, value_head, z_goal)
 
             # ----------------------------------------------------------
@@ -356,10 +387,11 @@ def cem_planner(
             logits = new_logits + 0.1
 
     # ------------------------------------------------------------------
-    # d. Return the highest-probability legal move at step 0.
+    # d. Return the best move and the softmax probabilities over legal moves.
     # ------------------------------------------------------------------
-    best_local = logits[0].argmax().item()
-    return legal_moves[best_local].item()
+    probs_final = torch.softmax(logits[0], dim=-1)  # (L,)
+    best_local  = probs_final.argmax().item()
+    return legal_moves[best_local].item(), probs_final.cpu().tolist()
 
 
 # ---------------------------------------------------------------------------
