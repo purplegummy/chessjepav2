@@ -22,9 +22,8 @@ class CategoricalBottleneck(nn.Module):
         dead = self.ema_usage < self.dead_code_threshold  # (n_cats, n_codes)
         n_dead = dead.sum().item()
         if n_dead > 0:
-            # reinitialize dead code weights with gaussian noise around current mean weight
-            weight = self.proj.weight  # (n_cats*n_codes, embed_dim)
-            weight_2d = weight.view(self.n_cats, self.n_codes, -1)
+            # use .data to avoid incrementing the version counter mid-forward
+            weight_2d = self.proj.weight.data.view(self.n_cats, self.n_codes, -1)
             for cat_idx in range(self.n_cats):
                 dead_codes = dead[cat_idx].nonzero(as_tuple=True)[0]
                 if len(dead_codes) == 0:
@@ -32,7 +31,6 @@ class CategoricalBottleneck(nn.Module):
                 alive_codes = (~dead[cat_idx]).nonzero(as_tuple=True)[0]
                 if len(alive_codes) == 0:
                     continue
-                # sample alive codes to copy from (with noise)
                 src = alive_codes[torch.randint(len(alive_codes), (len(dead_codes),))]
                 noise = torch.randn_like(weight_2d[cat_idx, src]) * 0.01
                 weight_2d[cat_idx, dead_codes] = weight_2d[cat_idx, src] + noise

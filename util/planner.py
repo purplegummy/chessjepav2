@@ -336,6 +336,7 @@ def cem_planner(
     z_init = encode_obs(encoder, bottleneck, obs_init, device)   # (1, 64, 32, 64)
     z_goal = encode_obs(encoder, bottleneck, obs_goal, device) if obs_goal is not None else None
 
+
     # ------------------------------------------------------------------
     # b. Categorical distribution: logits over legal moves, one per step.
     #    Shape: (H, n_legal) — start uniform (all zeros before softmax).
