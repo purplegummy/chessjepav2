@@ -100,8 +100,22 @@ def main(args):
     )
     criterion = torch.nn.CrossEntropyLoss()
     global_step = 0
+    start_epoch = 0
 
-    for epoch in range(args.epochs):
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        global_step = start_epoch * (train_size // args.batch)
+        # fast-forward schedulers to the correct step
+        for _ in range(min(global_step, args.warmup)):
+            warmup_scheduler.step()
+        for _ in range(max(0, global_step - args.warmup)):
+            cosine_scheduler.step()
+        logging.info(f"Resumed from {args.resume} at epoch {start_epoch}, step {global_step}")
+
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         for batch_idx, data in enumerate(train_loader):
             board_t  = data["state"].to(device)
@@ -144,6 +158,7 @@ if __name__ == "__main__":
     parser.add_argument("--data",    default="data/dataset.pt")
     parser.add_argument("--out",     default="checkpoints/checkpoint.pt")
     parser.add_argument("--epochs",  default=10,                          type=int)
+    parser.add_argument("--resume",  default=None,                        type=str)
     args = parser.parse_args()
 
     main(args)
