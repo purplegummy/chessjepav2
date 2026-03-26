@@ -138,8 +138,6 @@ def main(args):
             if batch_idx % 100 == 0:
                 log_step(epoch, batch_idx, loss.item(), l_pred.item(), l_entropy.item())
 
-            if global_step % 1000 == 0 and global_step > 0:
-                save_checkpoint(model, optimizer, epoch, args.out.replace(".pt", f"_step{global_step}.pt"))
 
         val_loss = validate(model, val_loader, criterion, device)
         logging.info(f"epoch {epoch:>3} | val_loss {val_loss:.4f}")
