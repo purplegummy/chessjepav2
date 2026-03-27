@@ -25,7 +25,6 @@ action sequences and iteratively refines it:
 Used as MPC: only the *first* action of the plan is executed, then re-plan.
 """
 
-import chess
 import torch
 import torch.nn.functional as F
 
@@ -161,125 +160,40 @@ def encode_obs(
 # 3. rollout
 # ---------------------------------------------------------------------------
 
-def rollout(
+def rollout_batch(
     predictor,
-    bottleneck,
     z_init: torch.Tensor,
-    action_sequence: torch.Tensor,
-    board: chess.Board | None = None,
+    action_sequences: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Autoregressively predict the latent state H steps into the future.
+    Batched rollout: predict latent states for N action sequences in parallel.
 
     Parameters
     ----------
-    predictor      : jepa.predictor.Predictor
-    bottleneck     : jepa.categoricalbottleneck.CategoricalBottleneck
-        Needed to convert predictor *logits* back to a hard one-hot code
-        before feeding into the next step (predictor expects one-hots as z).
-    z_init         : torch.Tensor, shape (1, 64, 32, 64)
-        Starting latent state (hard one-hot from encode_obs).
-    action_sequence : torch.Tensor, shape (H,), dtype=torch.long
-        Sequence of H move indices (integers in [0, NUM_MOVES-1]).
+    predictor        : jepa.predictor.Predictor
+    z_init           : (1, P, n_cats, n_codes)  — current latent state
+    action_sequences : (N, H)                   — N sequences of H move indices
 
     Returns
     -------
-    z_H : torch.Tensor, shape (1, 64, 32, 64)
-        Predicted latent state after applying all H actions.
-
-    Notes
-    -----
-    Error accumulation: each step uses a *predicted* z as input, not a real
-    one.  Small errors compound exponentially — a state that is slightly wrong
-    after step 1 leads to a more wrong prediction at step 2, and so on.
-    This is fundamental to all model-based planning; keep horizons short
-    (typically H ≤ 5-10) to limit drift.
+    z_all : (N, H, P, n_cats, n_codes)  — predicted latent state at every step
     """
-    z = z_init                              # (1, 64, 32, 64)
-    n_model_actions = action_sequence.shape[0]
-    # total horizon = model steps + opponent steps interleaved
-    # step 0 = model, step 1 = opponent, step 2 = model, ...
-    total_steps = n_model_actions * 2 - 1
-    model_step  = 0
-
-    # Track real board to get exact legal moves at each opponent step.
-    sim_board = board.copy() if board is not None else None
+    N, H = action_sequences.shape
+    z = z_init.expand(N, -1, -1, -1).clone()
+    steps = []
 
     with torch.no_grad():
-        for t in range(total_steps):
-            if t % 2 == 0:
-                # Model's turn — use CEM-chosen action
-                a_t = action_sequence[model_step].unsqueeze(0)   # (1,)
-                if sim_board is not None:
-                    try:
-                        move = index_to_move(a_t.item(), sim_board)
-                        if move in sim_board.legal_moves:
-                            sim_board.push(move)
-                        else:
-                            sim_board = None   # move was invalid; stop tracking
-                    except Exception:
-                        sim_board = None
-                model_step += 1
-            else:
-                # Opponent's turn — use real legal moves if board is still tracked
-                if sim_board is not None and not sim_board.is_game_over():
-                    legal = list(sim_board.legal_moves)
-                    opp_move = legal[torch.randint(0, len(legal), (1,)).item()]
-                    try:
-                        a_t = torch.tensor(
-                            [move_to_index(opp_move, sim_board)],
-                            dtype=torch.long, device=z.device,
-                        )
-                        sim_board.push(opp_move)
-                    except Exception:
-                        a_t = torch.randint(0, NUM_MOVES, (1,), device=z.device)
-                        sim_board = None
-                else:
-                    a_t = torch.randint(0, NUM_MOVES, (1,), device=z.device)
+        for t in range(H):
+            a_t    = action_sequences[:, t]
+            logits = predictor(z, a_t)
+            z      = F.one_hot(logits.argmax(dim=-1), num_classes=N_CODES).float()
+            steps.append(z)
 
-            logits  = predictor(z, a_t)
-            indices = logits.argmax(dim=-1)
-            z = F.one_hot(indices, num_classes=N_CODES).float()
-
-    return z     # z_H: predicted latent state at horizon H
+    return torch.stack(steps, dim=1)  # (N, H, P, n_cats, n_codes)
 
 
 # ---------------------------------------------------------------------------
-# 4. latent_cost
-# ---------------------------------------------------------------------------
-
-def score_terminal(
-    z: torch.Tensor,
-    value_head,
-    z_goal: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """
-    Score a terminal latent state.  Returns a *cost* (lower = better) so CEM
-    can use argsort ascending throughout.
-
-    If a value_head is provided, cost = -value(z)  (maximise win probability).
-    Otherwise falls back to latent MSE against z_goal (requires z_goal).
-
-    Parameters
-    ----------
-    z          : (1, 64, 32, 64)
-    value_head : ValueHead or None
-    z_goal     : (1, 64, 32, 64) or None — only needed without value_head
-
-    Returns
-    -------
-    cost : scalar tensor
-    """
-    if value_head is not None:
-        with torch.no_grad():
-            return -value_head(z).squeeze()   # negate: CEM minimises cost
-    if z_goal is not None:
-        return F.mse_loss(z, z_goal)
-    return torch.tensor(0.0, device=z.device)  # no signal — uniform cost → random legal move
-
-
-# ---------------------------------------------------------------------------
-# 5. cem_planner
+# 4. cem_planner
 # ---------------------------------------------------------------------------
 
 def cem_planner(
@@ -291,7 +205,6 @@ def cem_planner(
     config: dict,
     value_head=None,
     obs_goal: torch.Tensor | None = None,
-    board: chess.Board | None = None,
 ) -> int:
     """
     Find the best first move using CEM with a categorical distribution over
@@ -325,6 +238,7 @@ def cem_planner(
     n_elites  = config["n_elites"]
     n_iters   = config["n_iters"]
     device    = config["device"]
+    gamma     = config.get("gamma", 1.5)  # weight multiplier per step; >1 = later steps matter more
 
     n_legal = len(legal_move_indices)
     # Tensor of legal move indices so we can index into it easily.
@@ -350,23 +264,32 @@ def cem_planner(
             # ----------------------------------------------------------
             probs = torch.softmax(logits, dim=-1)  # (H, n_legal)
 
-            # torch.multinomial expects a 2-D weight matrix: (batch, classes).
-            # We want n_samples draws per timestep, so tile probs along batch.
-            probs_tiled = probs.unsqueeze(0).expand(n_samples, -1, -1)   # (N, H, L)
+            probs_tiled = probs.unsqueeze(0).expand(n_samples, -1, -1)      # (N, H, L)
             probs_flat  = probs_tiled.reshape(n_samples * horizon, n_legal)  # (N*H, L)
-            local_idx   = torch.multinomial(probs_flat, num_samples=1)        # (N*H, 1)
-            local_idx   = local_idx.reshape(n_samples, horizon)               # (N, H)
+            local_idx   = torch.multinomial(probs_flat, num_samples=1)       # (N*H, 1)
+            local_idx   = local_idx.reshape(n_samples, horizon)              # (N, H)
 
             # Convert local indices (into legal_moves) → actual move indices.
             samples_int = legal_moves[local_idx]   # (N, H)
 
             # ----------------------------------------------------------
-            # c-ii. Score each sequence.
+            # c-ii. Score all steps, accumulate with increasing weights.
             # ----------------------------------------------------------
+            z_all = rollout_batch(predictor, z_init, samples_int)  # (N, H, P, n_cats, n_codes)
+
+            # weights: gamma^0, gamma^1, ..., gamma^(H-1) — later steps weighted more
+            weights = torch.tensor([gamma ** t for t in range(horizon)], device=device)
+            weights = weights / weights.sum()  # normalise so scale is independent of H
+
             costs = torch.zeros(n_samples, device=device)
-            for i in range(n_samples):
-                z_H = rollout(predictor, bottleneck, z_init, samples_int[i], board=board)
-                costs[i] = score_terminal(z_H, value_head, z_goal)
+            for t in range(horizon):
+                z_t = z_all[:, t]   # (N, P, n_cats, n_codes)
+                if value_head is not None:
+                    step_cost = -value_head(z_t).squeeze(-1)                                    # (N,)
+                else:
+                    z_goal_exp = z_goal.expand(n_samples, -1, -1, -1)
+                    step_cost = F.mse_loss(z_t, z_goal_exp, reduction='none').mean(dim=(1, 2, 3))  # (N,)
+                costs += weights[t] * step_cost
 
             # ----------------------------------------------------------
             # c-iii. Keep top-K elites (lowest cost).
@@ -380,11 +303,8 @@ def cem_planner(
             #        maximum-likelihood update for a categorical distribution.
             # ----------------------------------------------------------
             new_logits = torch.zeros_like(logits)
-            for t in range(horizon):
-                for idx in elite_local_idx[:, t]:
-                    new_logits[t, idx] += 1.0
-            # Use counts as new logits (softmax will normalise).
-            # Add a small floor so unseen moves aren't completely zeroed out.
+            # elite_local_idx: (K, H) — scatter counts into (H, n_legal)
+            new_logits.scatter_add_(1, elite_local_idx.t(), torch.ones_like(elite_local_idx.t(), dtype=torch.float))
             logits = new_logits + 0.1
 
     # ------------------------------------------------------------------

@@ -1,14 +1,11 @@
 """
-train_value.py — Train the ValueHead on frozen encoder + bottleneck weights.
-
-The JEPA encoder and bottleneck are loaded from a checkpoint and kept frozen.
-Only the ValueHead parameters are updated.
+train_policy.py — Train the PolicyHead on frozen encoder + bottleneck weights.
 
 Usage
 -----
-python train_value.py \
-    --jepa_ckpt checkpoints/checkpoint_epoch1.pt \
-    --out       checkpoints/value_head.pt \
+python train_policy.py \
+    --jepa_ckpt checkpoints/checkpoint_epoch4.pt \
+    --out       checkpoints/policy_head.pt \
     --data      data/dataset.pt \
     --epochs    5 \
     --batch     512 \
@@ -23,7 +20,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
 from jepa.jepa import ChessJEPA
-from jepa.head import ValueHead
+from jepa.head import PolicyHead
 from util.chessdataset import ChessDataset
 
 logging.basicConfig(
@@ -32,18 +29,17 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-BOTTLENECK_TAU = 1e-5   # near-deterministic during inference / value training
+BOTTLENECK_TAU = 1e-5
 N_CATS  = 8
 N_CODES = 16
 
 
 def encode_batch(encoder, bottleneck, board, device):
-    """Encode a batch of boards to hard latent codes. No gradients."""
     with torch.no_grad():
         taps = encoder(board.to(device))
         final_layer = max(taps.keys())
-        h = taps[final_layer]                           # (B, 64, 256)
-        z, _ = bottleneck(h, tau=BOTTLENECK_TAU)        # (B, 64, 32, 64)
+        h = taps[final_layer]
+        z, _ = bottleneck(h, tau=BOTTLENECK_TAU)
     return z
 
 
@@ -51,9 +47,6 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     logging.info(f"device: {device}")
 
-    # ------------------------------------------------------------------ #
-    # Load frozen JEPA encoder + bottleneck
-    # ------------------------------------------------------------------ #
     jepa = ChessJEPA(n_cats=N_CATS, n_codes=N_CODES).to(device)
     ckpt = torch.load(args.jepa_ckpt, map_location=device)
     jepa.load_state_dict(ckpt["model_state_dict"])
@@ -64,16 +57,10 @@ def main(args):
     encoder    = jepa.encoder
     bottleneck = jepa.bottleneck
 
-    # ------------------------------------------------------------------ #
-    # Value head (trainable)
-    # ------------------------------------------------------------------ #
-    value_head = ValueHead(n_cats=N_CATS, n_codes=N_CODES).to(device)
-    total = sum(p.numel() for p in value_head.parameters())
-    logging.info(f"ValueHead params: {total:,}")
+    policy_head = PolicyHead(n_cats=N_CATS, n_codes=N_CODES).to(device)
+    total = sum(p.numel() for p in policy_head.parameters())
+    logging.info(f"PolicyHead params: {total:,}")
 
-    # ------------------------------------------------------------------ #
-    # Data
-    # ------------------------------------------------------------------ #
     dataset = ChessDataset(args.data)
     val_size   = int(0.1 * len(dataset))
     train_size = len(dataset) - val_size
@@ -82,25 +69,23 @@ def main(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, num_workers=0)
 
-    optimizer = torch.optim.Adam(value_head.parameters(), lr=args.lr)
-    # MSE against float target in (-1, 1) — simple and effective
-    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(policy_head.parameters(), lr=args.lr)
+    criterion = nn.CrossEntropyLoss()
 
     best_val = float("inf")
 
     for epoch in range(args.epochs):
-        # ---- train ----
-        value_head.train()
+        policy_head.train()
         total_loss = 0.0
         for batch_idx, data in enumerate(train_loader):
             board  = data["state"]               # (B, 17, 8, 8)
-            result = data["result"].float().to(device)  # (B,) in {-1, 0, 1}
+            action = data["action"].to(device)   # (B,) int64 move indices
 
             z = encode_batch(encoder, bottleneck, board, device)
 
             optimizer.zero_grad()
-            pred = value_head(z)                 # (B,)
-            loss = criterion(pred, result)
+            logits = policy_head(z)              # (B, 4672)
+            loss = criterion(logits, action)
             loss.backward()
             optimizer.step()
 
@@ -110,46 +95,46 @@ def main(args):
                     f"epoch {epoch+1:>2} | batch {batch_idx:>5} | loss {loss.item():.4f}"
                 )
 
-        # ---- validate ----
-        value_head.eval()
+        policy_head.eval()
         val_loss = 0.0
-        correct  = 0
+        correct_top1  = 0
+        correct_top5  = 0
         total_samples = 0
         with torch.no_grad():
             for data in val_loader:
                 board  = data["state"]
-                result = data["result"].float().to(device)
+                action = data["action"].to(device)
                 z      = encode_batch(encoder, bottleneck, board, device)
-                pred   = value_head(z)
-                val_loss += criterion(pred, result).item()
+                logits = policy_head(z)
 
-                # sign accuracy: did we predict the right winner?
-                pred_sign   = pred.sign()
-                result_sign = result.sign()
-                correct += (pred_sign == result_sign).sum().item()
-                total_samples += result.shape[0]
+                val_loss += criterion(logits, action).item()
+
+                top5 = logits.topk(5, dim=-1).indices
+                correct_top1 += (top5[:, 0] == action).sum().item()
+                correct_top5 += (top5 == action.unsqueeze(1)).any(dim=1).sum().item()
+                total_samples += action.shape[0]
 
         val_loss /= len(val_loader)
-        acc = correct / total_samples
+        top1_acc = correct_top1 / total_samples
+        top5_acc = correct_top5 / total_samples
         logging.info(
-            f"epoch {epoch+1:>2} | val_loss {val_loss:.4f} | sign_acc {acc:.3f}"
+            f"epoch {epoch+1:>2} | val_loss {val_loss:.4f} | top1 {top1_acc:.3f} | top5 {top5_acc:.3f}"
         )
 
         if val_loss < best_val:
             best_val = val_loss
             torch.save(
-                {"value_head_state_dict": value_head.state_dict(), "epoch": epoch + 1},
+                {"policy_head_state_dict": policy_head.state_dict(), "epoch": epoch + 1},
                 args.out,
             )
-            logging.info(f"Saved best value head to {args.out}")
+            logging.info(f"Saved best policy head to {args.out}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--jepa_ckpt", required=True,
-                        help="Path to trained ChessJEPA checkpoint")
+    parser.add_argument("--jepa_ckpt", required=True)
     parser.add_argument("--data",      default="data/dataset.pt")
-    parser.add_argument("--out",       default="checkpoints/value_head.pt")
+    parser.add_argument("--out",       default="checkpoints/policy/policy_head.pt")
     parser.add_argument("--epochs",    default=5,    type=int)
     parser.add_argument("--batch",     default=512,  type=int)
     parser.add_argument("--lr",        default=3e-4, type=float)

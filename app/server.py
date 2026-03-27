@@ -14,7 +14,8 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 import chess
 import torch
@@ -36,6 +37,7 @@ parser.add_argument("--horizon",    default=3,    type=int)
 parser.add_argument("--n_samples",  default=64,   type=int)
 parser.add_argument("--n_elites",   default=8,    type=int)
 parser.add_argument("--n_iters",    default=10,   type=int)
+parser.add_argument("--gamma",      default=1.5,  type=float)
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,7 +52,11 @@ print("Model ready.")
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
 # ─────────────────────────────────────────────────────────────────────────────
-app = Flask(__name__)
+app = Flask(
+    __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "static"),
+    template_folder=os.path.join(os.path.dirname(__file__), "templates"),
+)
 
 
 PIECE_MAP = {'q': chess.QUEEN, 'r': chess.ROOK, 'b': chess.BISHOP,
@@ -136,6 +142,7 @@ def run_planner(board: chess.Board, data: dict = None, top_n: int = 5):
         "n_samples": args.n_samples,
         "n_elites":  args.n_elites,
         "n_iters":   args.n_iters,
+        "gamma":     args.gamma,
         "device":    device,
     }
 
@@ -146,7 +153,6 @@ def run_planner(board: chess.Board, data: dict = None, top_n: int = 5):
         config,
         value_head=None,
         obs_goal=obs_goal,
-        board=board,
     )
 
     # Map the returned move index back to a chess.Move
