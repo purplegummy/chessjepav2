@@ -11,7 +11,7 @@ PolicyHead output: (B, ACTION_SIZE) logits — apply softmax / mask illegal move
 
 import torch
 import torch.nn as nn
-from encoder import TransformerBlock
+from jepa.encoder import TransformerBlock
 ACTION_SIZE = 73 * 64  # 4672 — AlphaZero-style encoding (see util/parse.py)
 
 
