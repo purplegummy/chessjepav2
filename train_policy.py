@@ -89,7 +89,7 @@ def main(args):
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False,   num_workers=0)
 
     optimizer = torch.optim.Adam(policy_head.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, last_epoch=start_epoch - 1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=start_epoch + args.epochs)
     criterion = nn.CrossEntropyLoss()
 
     for epoch in range(start_epoch, start_epoch + args.epochs):
