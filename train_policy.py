@@ -61,21 +61,38 @@ def main(args):
     total = sum(p.numel() for p in policy_head.parameters())
     logging.info(f"PolicyHead params: {total:,}")
 
+    start_epoch = 0
+    best_val    = float("inf")
+    if args.resume:
+        resume_ckpt = torch.load(args.resume, map_location=device)
+        policy_head.load_state_dict(resume_ckpt["policy_head_state_dict"])
+        start_epoch = resume_ckpt.get("epoch", 0)
+        best_val    = resume_ckpt.get("best_val", float("inf"))
+        logging.info(f"Resumed from {args.resume} (epoch {start_epoch}, best_val {best_val:.4f})")
+
     dataset = ChessDataset(args.data)
     val_size   = int(0.1 * len(dataset))
     train_size = len(dataset) - val_size
     train_ds, val_ds = random_split(dataset, [train_size, val_size])
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True,  num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, num_workers=0)
+    # Oversample late-game positions: fewer pieces on board = higher weight
+    # piece planes are channels 0-11; sum gives total piece count per position
+    all_states = dataset.data["states"]  # (N, 17, 8, 8)
+    piece_counts = all_states[:, :12].sum(dim=(1, 2, 3)).float()  # (N,)
+    # weight = 1 / piece_count so sparse boards get upsampled
+    weights = 1.0 / piece_counts.clamp(min=1.0)
+    train_indices = train_ds.indices
+    train_weights = weights[train_indices]
+    sampler = torch.utils.data.WeightedRandomSampler(train_weights, num_samples=len(train_ds), replacement=True)
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch, sampler=sampler, num_workers=0)
+    val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False,   num_workers=0)
 
     optimizer = torch.optim.Adam(policy_head.parameters(), lr=args.lr)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, last_epoch=start_epoch - 1)
     criterion = nn.CrossEntropyLoss()
 
-    best_val = float("inf")
-
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, start_epoch + args.epochs):
         policy_head.train()
         total_loss = 0.0
         for batch_idx, data in enumerate(train_loader):
@@ -131,7 +148,7 @@ def main(args):
         if val_loss < best_val:
             best_val = val_loss
             torch.save(
-                {"policy_head_state_dict": policy_head.state_dict(), "epoch": epoch + 1},
+                {"policy_head_state_dict": policy_head.state_dict(), "epoch": epoch + 1, "best_val": best_val},
                 args.out,
             )
             logging.info(f"Saved best policy head to {args.out}")
@@ -143,7 +160,8 @@ if __name__ == "__main__":
     parser.add_argument("--data",      default="data/dataset.pt")
     parser.add_argument("--out",       default="checkpoints/policy/policy_head.pt")
     parser.add_argument("--epochs",    default=5,    type=int)
-    parser.add_argument("--batch",     default=512,  type=int)
+    parser.add_argument("--batch",     default=2048, type=int)
     parser.add_argument("--lr",        default=3e-4, type=float)
+    parser.add_argument("--resume",    default=None, help="path to checkpoint to resume from")
     args = parser.parse_args()
     main(args)
