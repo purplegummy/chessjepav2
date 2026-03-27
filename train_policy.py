@@ -75,17 +75,7 @@ def main(args):
     train_size = len(dataset) - val_size
     train_ds, val_ds = random_split(dataset, [train_size, val_size])
 
-    # Oversample late-game positions: fewer pieces on board = higher weight
-    # piece planes are channels 0-11; sum gives total piece count per position
-    all_states = dataset.data["states"]  # (N, 17, 8, 8)
-    piece_counts = all_states[:, :12].sum(dim=(1, 2, 3)).float()  # (N,)
-    # weight = 1 / piece_count so sparse boards get upsampled
-    weights = 1.0 / piece_counts.clamp(min=1.0)
-    train_indices = train_ds.indices
-    train_weights = weights[train_indices]
-    sampler = torch.utils.data.WeightedRandomSampler(train_weights, num_samples=len(train_ds), replacement=True)
-
-    train_loader = DataLoader(train_ds, batch_size=args.batch, sampler=sampler, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False,   num_workers=0)
 
     optimizer = torch.optim.Adam(policy_head.parameters(), lr=args.lr)
