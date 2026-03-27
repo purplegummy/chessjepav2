@@ -106,11 +106,11 @@ def main(args):
 
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup,
-        last_epoch=min(global_step, args.warmup) - 1,
+        last_epoch=min(global_step, args.warmup),
     )
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps - args.warmup, eta_min=1e-6,
-        last_epoch=max(0, global_step - args.warmup) - 1,
+        last_epoch=max(-1, global_step - args.warmup - 1),
     )
 
     for epoch in range(start_epoch, args.epochs):
