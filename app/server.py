@@ -2,12 +2,14 @@
 server.py — Flask backend for ChessJEPA GUI.
 
 Run with:
-    python server.py --checkpoint checkpoints/checkpoint.pt
+    python app/server.py \
+        --jepa_ckpt    checkpoints/checkpoint_epoch4.pt \
+        --policy_ckpt  checkpoints/policy/policy_head.pt
 
 Endpoints
 ---------
 GET  /              — serves the chess UI
-POST /api/best_move — runs CEM planner, returns best move + analysis
+POST /api/best_move — runs policy head, returns best move + top moves
 """
 
 import argparse
@@ -19,35 +21,49 @@ sys.path.insert(0, ROOT)
 
 import chess
 import torch
+import torch.nn.functional as F
 from flask import Flask, jsonify, render_template, request
 
+from jepa.jepa import ChessJEPA
+from jepa.head import PolicyHead
 from util.parse import board_to_tensor, index_to_move, move_to_index
-from util.planner import load_models
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--checkpoint", default="checkpoints/checkpoint.pt")
-parser.add_argument("--device",     default="cpu")
-parser.add_argument("--host",       default="127.0.0.1")
-parser.add_argument("--port",       default=5000, type=int)
-# CEM defaults (can be overridden per-request in future)
-parser.add_argument("--horizon",    default=3,    type=int)
-parser.add_argument("--n_samples",  default=64,   type=int)
-parser.add_argument("--n_elites",   default=8,    type=int)
-parser.add_argument("--n_iters",    default=10,   type=int)
-parser.add_argument("--gamma",      default=1.5,  type=float)
+parser.add_argument("--jepa_ckpt",   required=True)
+parser.add_argument("--policy_ckpt", required=True)
+parser.add_argument("--device", default="cpu")
+parser.add_argument("--host",   default="127.0.0.1")
+parser.add_argument("--port",   default=5000, type=int)
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model (loaded once at startup)
 # ─────────────────────────────────────────────────────────────────────────────
-device = torch.device(args.device)
-print(f"Loading model from {args.checkpoint} on {device}…")
-encoder, bottleneck, predictor, _ = load_models(args.checkpoint, device)
-print("Model ready.")
+N_CATS  = 8
+N_CODES = 16
+BOTTLENECK_TAU = 1e-5
 
+device = torch.device(args.device)
+print(f"Loading JEPA from {args.jepa_ckpt} on {device}…")
+jepa = ChessJEPA(n_cats=N_CATS, n_codes=N_CODES).to(device)
+ckpt = torch.load(args.jepa_ckpt, map_location=device)
+jepa.load_state_dict(ckpt["model_state_dict"])
+jepa.eval()
+for p in jepa.parameters():
+    p.requires_grad = False
+
+encoder    = jepa.encoder
+bottleneck = jepa.bottleneck
+
+print(f"Loading policy head from {args.policy_ckpt}…")
+policy_head = PolicyHead(n_cats=N_CATS, n_codes=N_CODES).to(device)
+ph_ckpt = torch.load(args.policy_ckpt, map_location=device)
+policy_head.load_state_dict(ph_ckpt["policy_head_state_dict"])
+policy_head.eval()
+print("Models ready.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
@@ -59,70 +75,18 @@ app = Flask(
 )
 
 
-PIECE_MAP = {'q': chess.QUEEN, 'r': chess.ROOK, 'b': chess.BISHOP,
-             'n': chess.KNIGHT, 'p': chess.PAWN, 'k': chess.KING}
+def pick_move(board: chess.Board, top_n: int = 5):
+    """Encode the board, run the policy head, return best legal move + top moves."""
+    tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
 
+    with torch.no_grad():
+        taps = encoder(tensor)
+        h = taps[max(taps.keys())]
+        z, _ = bottleneck(h, tau=BOTTLENECK_TAU)
+        logits = policy_head(z)          # (1, 4672)
+        logits = logits.squeeze(0)       # (4672,)
 
-def make_goal_board(board: chess.Board, data: dict) -> chess.Board:
-    """Returns a goal board whose turn is always set to match board.turn so
-    board_to_tensor flips consistently for both the current and goal positions."""
-    """
-    Build the goal board according to the selected goal type.
-
-    king_capture  — remove opponent's king. Drives planner toward checkmate-like states.
-    piece_capture — remove a specific opponent piece type. E.g. "capture their queen."
-    target_fen    — use a user-supplied FEN as the goal position directly.
-    preset        — same as target_fen but from the preset dropdown.
-
-    In all cases the goal board is encoded by the same encoder → z_goal.
-    CEM minimises MSE(z_predicted, z_goal) in latent space.
-    """
-    def fix_turn(goal: chess.Board) -> chess.Board:
-        """Force goal.turn to match board.turn so encoding flips consistently."""
-        goal.turn = board.turn
-        return goal
-
-    goal_type     = data.get("goal_type", "king_capture")
-    planner_color = board.turn
-    human_color   = not planner_color
-
-    checkmate_fen = "k7/2K5/1Q6/8/8/8/8/8 w - - 0 1" if planner_color == chess.WHITE \
-                    else "8/8/8/8/8/6q1/5k2/7K b - - 0 1"
-
-    if goal_type == "king_capture":
-        return fix_turn(chess.Board(checkmate_fen))
-
-    elif goal_type == "piece_capture":
-        piece_char = data.get("capture_piece", "q")
-        piece_type = PIECE_MAP.get(piece_char, chess.QUEEN)
-        goal = board.copy()
-        for sq in list(goal.pieces(piece_type, human_color)):
-            goal.remove_piece_at(sq)
-        return fix_turn(goal)
-
-    elif goal_type in ("target_fen", "preset"):
-        goal_fen = data.get("goal_fen", "").strip()
-        try:
-            return fix_turn(chess.Board(goal_fen))
-        except Exception:
-            return fix_turn(chess.Board(checkmate_fen))
-
-    return fix_turn(chess.Board(checkmate_fen))
-
-
-def run_planner(board: chess.Board, data: dict = None, top_n: int = 5):
-    """
-    Run categorical CEM over legal moves to pick the best first action.
-    """
-    from util.planner import cem_planner as _cem
-
-    obs_init = board_to_tensor(board).float()
-
-    goal_board = make_goal_board(board, data or {})
-    obs_goal   = board_to_tensor(goal_board).float()
-
-    # Build (move, index) pairs for every legal move, skipping any that
-    # can't be encoded (shouldn't happen, but be safe).
+    # Build legal (move, index) pairs
     move_index_pairs = []
     for m in board.legal_moves:
         try:
@@ -131,49 +95,27 @@ def run_planner(board: chess.Board, data: dict = None, top_n: int = 5):
             continue
 
     if not move_index_pairs:
-        return None, {}
+        return None, []
 
-    legal_moves_list   = [m   for m, _ in move_index_pairs]
-    legal_indices_list = [idx for _, idx in move_index_pairs]
+    legal_moves   = [m   for m, _ in move_index_pairs]
+    legal_indices = [idx for _, idx in move_index_pairs]
 
-    # ── Categorical CEM to pick the best move ─────────────────────────────
-    config = {
-        "horizon":   args.horizon,
-        "n_samples": args.n_samples,
-        "n_elites":  args.n_elites,
-        "n_iters":   args.n_iters,
-        "gamma":     args.gamma,
-        "device":    device,
-    }
+    # Mask to legal moves only
+    legal_logits = logits[legal_indices]
+    probs = F.softmax(legal_logits, dim=0).cpu().tolist()
 
-    best_idx, probs = _cem(
-        encoder, bottleneck, predictor,
-        obs_init,
-        legal_indices_list,
-        config,
-        value_head=None,
-        obs_goal=obs_goal,
-    )
+    # Best move
+    best_local = max(range(len(probs)), key=lambda i: probs[i])
+    best_move  = legal_moves[best_local]
 
-    # Map the returned move index back to a chess.Move
-    try:
-        best_move = index_to_move(best_idx, board)
-        if best_move not in board.legal_moves:
-            best_move = legal_moves_list[0]
-    except Exception:
-        best_move = legal_moves_list[0]
+    # Top-N by probability
+    ranked = sorted(zip(legal_moves, probs), key=lambda x: x[1], reverse=True)
+    top_moves = [
+        {"san": board.san(m), "uci": m.uci(), "prob": round(p, 4)}
+        for m, p in ranked[:top_n]
+    ]
 
-    # ── Build top-moves display sorted by CEM probability ─────────────────
-    move_probs = sorted(zip(legal_moves_list, probs), key=lambda x: x[1], reverse=True)
-    top_moves  = [{"san": board.san(m), "uci": m.uci(), "prob": round(p, 4)}
-                  for m, p in move_probs[:top_n]]
-    best_prob  = probs[legal_indices_list.index(best_idx)] if best_idx in legal_indices_list else probs[0]
-
-    return best_move, {
-        "confidence": round(best_prob, 4),
-        "top_moves":  top_moves,
-        "value":      0.0,
-    }
+    return best_move, top_moves
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +130,7 @@ def index():
 @app.route("/api/best_move", methods=["POST"])
 def best_move():
     data  = request.get_json(force=True)
-    fen   = data.get("fen",   chess.STARTING_FEN)
+    fen   = data.get("fen", chess.STARTING_FEN)
     top_n = data.get("top_n", 5)
 
     try:
@@ -199,17 +141,18 @@ def best_move():
     if board.is_game_over():
         return jsonify({"error": "Game over"}), 400
 
-    move, analysis = run_planner(board, data=data, top_n=top_n)
+    move, top_moves = pick_move(board, top_n=top_n)
 
     if move is None:
         return jsonify({"error": "No legal moves"}), 400
 
+    confidence = top_moves[0]["prob"] if top_moves else 0.0
+
     return jsonify({
         "move":       move.uci(),
         "san":        board.san(move),
-        "confidence": analysis.get("confidence", 0.0),
-        "top_moves":  analysis.get("top_moves",  []),
-        "value":      analysis.get("value",       0.0),
+        "confidence": confidence,
+        "top_moves":  top_moves,
     })
 
 

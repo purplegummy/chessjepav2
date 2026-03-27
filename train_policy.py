@@ -70,6 +70,7 @@ def main(args):
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, num_workers=0)
 
     optimizer = torch.optim.Adam(policy_head.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     criterion = nn.CrossEntropyLoss()
 
     best_val = float("inf")
@@ -91,8 +92,12 @@ def main(args):
 
             total_loss += loss.item()
             if batch_idx % 100 == 0:
+                with torch.no_grad():
+                    top5 = logits.topk(5, dim=-1).indices
+                    top1_acc = (top5[:, 0] == action).float().mean().item()
+                    top5_acc = (top5 == action.unsqueeze(1)).any(dim=1).float().mean().item()
                 logging.info(
-                    f"epoch {epoch+1:>2} | batch {batch_idx:>5} | loss {loss.item():.4f}"
+                    f"epoch {epoch+1:>2} | batch {batch_idx:>5} | loss {loss.item():.4f} | top1 {top1_acc:.3f} | top5 {top5_acc:.3f}"
                 )
 
         policy_head.eval()
@@ -114,11 +119,13 @@ def main(args):
                 correct_top5 += (top5 == action.unsqueeze(1)).any(dim=1).sum().item()
                 total_samples += action.shape[0]
 
+        scheduler.step()
+
         val_loss /= len(val_loader)
         top1_acc = correct_top1 / total_samples
         top5_acc = correct_top5 / total_samples
         logging.info(
-            f"epoch {epoch+1:>2} | val_loss {val_loss:.4f} | top1 {top1_acc:.3f} | top5 {top5_acc:.3f}"
+            f"epoch {epoch+1:>2} | val_loss {val_loss:.4f} | top1 {top1_acc:.3f} | top5 {top5_acc:.3f} | lr {scheduler.get_last_lr()[0]:.2e}"
         )
 
         if val_loss < best_val:

@@ -64,9 +64,9 @@ class PolicyHead(nn.Module):
     encoded with util.parse.move_to_index().
     """
 
-    def __init__(self, n_cats: int = 8, n_codes: int = 16, hidden_dim: int = 512):
+    def __init__(self, n_cats: int = 8, n_codes: int = 16, n_patches: int = 64, hidden_dim: int = 512):
         super().__init__()
-        in_dim = n_cats * n_codes  # 128 after mean-pool over 64 patches
+        in_dim = n_patches * n_cats * n_codes  # 64 * 128 = 8192 — full spatial layout
 
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
@@ -89,6 +89,5 @@ class PolicyHead(nn.Module):
         logits : (B, ACTION_SIZE)  unnormalised log-probabilities
         """
         B, N, n_cats, n_codes = z.shape
-        z = z.view(B, N, n_cats * n_codes)  # (B, N, 128)
-        z = z.mean(dim=1)                   # (B, 128) — pool over patches
-        return self.net(z)                  # (B, 4672)
+        z = z.view(B, N * n_cats * n_codes)  # (B, 8192) — flatten all patches
+        return self.net(z)                   # (B, 4672)

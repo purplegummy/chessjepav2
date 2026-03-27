@@ -1,62 +1,28 @@
 document.addEventListener('DOMContentLoaded', () => {
 
     // ── State ────────────────────────────────────────────────────────────────
-    const game        = new Chess();
-    let board         = null;
-    let playerColor   = 'white';   // 'white' or 'black'
-    let selectedSq    = null;
-    let hintsOn       = true;
-    let aiPending        = false;
-    let lastAiMove       = null;    // {from, to} for highlight
-    let stockfishEnabled = false;
-
-    // ── Slider live-value display ────────────────────────────────────────────
-    ['Horizon','Samples','Elites','Iters'].forEach(name => {
-        const slider = document.getElementById('slider' + name);
-        const label  = document.getElementById('val'    + name);
-        slider.addEventListener('input', () => label.textContent = slider.value);
-    });
-
-    // ── Goal type show/hide ──────────────────────────────────────────────────
-    document.getElementById('goalType').addEventListener('change', function() {
-        document.getElementById('pieceCaptureOpts').style.display = this.value === 'piece_capture' ? '' : 'none';
-        document.getElementById('targetFenOpts').style.display    = this.value === 'target_fen'    ? '' : 'none';
-        document.getElementById('presetOpts').style.display       = this.value === 'preset'        ? '' : 'none';
-    });
-
-    // ── Collect current planner settings ────────────────────────────────────
-    function getPlannerSettings() {
-        const goalType = document.getElementById('goalType').value;
-        const settings = {
-            horizon:   parseInt(document.getElementById('sliderHorizon').value),
-            n_samples: parseInt(document.getElementById('sliderSamples').value),
-            n_elites:  parseInt(document.getElementById('sliderElites').value),
-            n_iters:   parseInt(document.getElementById('sliderIters').value),
-            goal_type: goalType,
-        };
-        if (goalType === 'piece_capture')
-            settings.capture_piece = document.getElementById('captureTarget').value;
-        if (goalType === 'target_fen' || goalType === 'preset')
-            settings.goal_fen = goalType === 'preset'
-                ? document.getElementById('presetFen').value
-                : document.getElementById('targetFen').value.trim();
-        return settings;
-    }
+    const game      = new Chess();
+    let board       = null;
+    let playerColor = 'white';
+    let selectedSq  = null;
+    let hintsOn     = true;
+    let aiPending   = false;
+    let lastAiMove  = null;
 
     // ── DOM refs ─────────────────────────────────────────────────────────────
-    const statusCard      = document.getElementById('statusCard');
-    const statusIcon      = document.getElementById('statusIcon');
-    const statusTitle     = document.getElementById('statusTitle');
-    const statusSub       = document.getElementById('statusSub');
-    const statusBadge     = document.getElementById('statusBadge');
-    const thinkingDot     = document.getElementById('thinkingDot');
-    const bestMoveSan     = document.getElementById('bestMoveSan');
-    const confidenceBar   = document.getElementById('confidenceBar');
-    const confidencePct   = document.getElementById('confidencePct');
-    const topMovesList    = document.getElementById('topMovesList');
-    const moveHistory     = document.getElementById('moveHistory');
-    const fenInput        = document.getElementById('fenInput');
-    const boardPanel      = document.querySelector('.board-panel');
+    const statusCard    = document.getElementById('statusCard');
+    const statusIcon    = document.getElementById('statusIcon');
+    const statusTitle   = document.getElementById('statusTitle');
+    const statusSub     = document.getElementById('statusSub');
+    const statusBadge   = document.getElementById('statusBadge');
+    const thinkingDot   = document.getElementById('thinkingDot');
+    const bestMoveSan   = document.getElementById('bestMoveSan');
+    const confidenceBar = document.getElementById('confidenceBar');
+    const confidencePct = document.getElementById('confidencePct');
+    const topMovesList  = document.getElementById('topMovesList');
+    const moveHistory   = document.getElementById('moveHistory');
+    const fenInput      = document.getElementById('fenInput');
+    const boardPanel    = document.querySelector('.board-panel');
 
     // ── Chessboard.js config ─────────────────────────────────────────────────
     function buildBoardConfig() {
@@ -66,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     wK:'♔', wQ:'♕', wR:'♖', wB:'♗', wN:'♘', wP:'♙',
                     bK:'♚', bQ:'♛', bR:'♜', bB:'♝', bN:'♞', bP:'♟'
                 };
-                const color = piece[0] === 'w' ? '#fff' : '#1a1a1a';
+                const color  = piece[0] === 'w' ? '#fff' : '#1a1a1a';
                 const shadow = piece[0] === 'w'
                     ? 'drop-shadow(0 1px 3px rgba(0,0,0,0.8))'
                     : 'drop-shadow(0 1px 2px rgba(255,255,255,0.3))';
@@ -103,13 +69,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function tryMove(from, to) {
         const move = game.move({ from, to, promotion: 'q' });
         if (!move) return null;
-
         lastAiMove = null;
         updateAfterMove();
-
-        if (!game.game_over()) {
-            scheduleAiMove();
-        }
+        if (!game.game_over()) scheduleAiMove();
         return move;
     }
 
@@ -126,7 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const resp = await fetch('/api/best_move', {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ fen: game.fen(), top_n: 5, stockfish_opponent: stockfishEnabled, ...getPlannerSettings() }),
+                body:    JSON.stringify({ fen: game.fen(), top_n: 5 }),
             });
 
             if (!resp.ok) throw new Error(`Server error ${resp.status}`);
@@ -139,7 +101,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             game.move({ from, to, promotion: promo });
             lastAiMove = { from, to };
-
             board.position(game.fen());
             updateAnalysisPanel(data);
         } catch (err) {
@@ -156,8 +117,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Highlight helpers ────────────────────────────────────────────────────
     function highlightLegal(source) {
         clearHighlights();
-        const moves = game.moves({ square: source, verbose: true });
-        moves.forEach(m => {
+        game.moves({ square: source, verbose: true }).forEach(m => {
             document.querySelector(`[data-square="${m.to}"]`)?.classList.add('sq-legal');
         });
         document.querySelector(`[data-square="${source}"]`)?.classList.add('sq-selected');
@@ -185,12 +145,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function updateStatus() {
-        statusCard.className = 'status-card';
+        statusCard.className  = 'status-card';
         statusBadge.className = 'status-badge';
 
         if (game.in_checkmate()) {
-            const winner = game.turn() === 'w' ? 'Black' : 'White';
-            const isPlayerWin = (winner.toLowerCase() === playerColor);
+            const winner      = game.turn() === 'w' ? 'Black' : 'White';
+            const isPlayerWin = winner.toLowerCase() === playerColor;
             statusIcon.textContent  = isPlayerWin ? '🏆' : '🤖';
             statusTitle.textContent = isPlayerWin ? 'You Win!' : 'JEPA Wins!';
             statusSub.textContent   = `Checkmate — ${winner} wins`;
@@ -208,9 +168,6 @@ document.addEventListener('DOMContentLoaded', () => {
             statusBadge.classList.add('badge-draw');
             return;
         }
-
-        const isPlayerTurn = (game.turn() === playerColor[0]);
-
         if (game.in_check()) {
             statusIcon.textContent  = '⚠️';
             statusTitle.textContent = 'Check!';
@@ -220,11 +177,10 @@ document.addEventListener('DOMContentLoaded', () => {
             statusBadge.classList.add('badge-check');
             return;
         }
-
         if (aiPending) {
             statusIcon.textContent  = '🤖';
             statusTitle.textContent = 'JEPA Thinking…';
-            statusSub.textContent   = 'Running CEM planner';
+            statusSub.textContent   = 'Running policy head';
             statusBadge.textContent = 'AI';
             statusCard.classList.add('ai-turn');
             statusBadge.classList.add('badge-ai');
@@ -244,9 +200,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const pct = ((data.confidence || 0) * 100).toFixed(1);
         confidenceBar.style.width = `${pct}%`;
         confidencePct.textContent = `${pct}%`;
-
-        const predValue = document.getElementById('predValue');
-        if (predValue) predValue.textContent = data.value !== undefined ? data.value.toFixed(3) : '—';
 
         topMovesList.innerHTML = '';
         (data.top_moves || []).forEach((m, i) => {
@@ -269,9 +222,7 @@ document.addEventListener('DOMContentLoaded', () => {
         bestMoveSan.textContent   = '—';
         confidenceBar.style.width = '0%';
         confidencePct.textContent = '—';
-        const predValue = document.getElementById('predValue');
-        if (predValue) predValue.textContent = '—';
-        topMovesList.innerHTML = '';
+        topMovesList.innerHTML    = '';
     }
 
     function updateMoveHistory() {
@@ -285,8 +236,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const moveNum = Math.floor(i / 2) + 1;
             const wSan    = history[i].san;
             const bSan    = history[i + 1] ? history[i + 1].san : null;
-            const wLast   = (i === history.length - 1);
-            const bLast   = (i + 1 === history.length - 1);
+            const wLast   = i === history.length - 1;
+            const bLast   = i + 1 === history.length - 1;
             html += `<span class="history-pair">
                 <span class="history-num">${moveNum}.</span>
                 <span class="history-san${wLast ? ' last' : ''}">${wSan}</span>
@@ -339,13 +290,6 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('hintsToggle').addEventListener('change', e => {
         hintsOn = e.target.checked;
         if (!hintsOn) clearHighlights();
-    });
-
-    document.getElementById('stockfishBtn').addEventListener('click', () => {
-        stockfishEnabled = !stockfishEnabled;
-        const btn = document.getElementById('stockfishBtn');
-        btn.textContent = `🐟 Stockfish: ${stockfishEnabled ? 'On' : 'Off'}`;
-        btn.classList.toggle('btn-active', stockfishEnabled);
     });
 
     // ── Init ─────────────────────────────────────────────────────────────────
