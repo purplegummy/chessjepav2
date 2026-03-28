@@ -90,6 +90,33 @@ def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
     return pull + push
 
 
+def center_alignment_loss(z: torch.Tensor, evals: torch.Tensor,
+                          win_thresh: float = 150, lose_thresh: float = -150):
+    """
+    Forces all winning positions toward a single 'north pole' and all losing
+    positions toward a single 'south pole' — regardless of game phase or opening.
+    z is already L2-normalized so centroids live on the sphere.
+    """
+    win_mask  = evals >  win_thresh
+    lose_mask = evals < lose_thresh
+
+    if win_mask.sum() < 1 or lose_mask.sum() < 1:
+        return torch.tensor(0.0, device=z.device)
+
+    win_centroid  = z[win_mask].mean(0)
+    lose_centroid = z[lose_mask].mean(0)
+
+    # Normalize centroids so we measure angular distance, not magnitude
+    win_centroid  = win_centroid  / (win_centroid.norm()  + 1e-8)
+    lose_centroid = lose_centroid / (lose_centroid.norm() + 1e-8)
+
+    # Pull each point toward its class centroid
+    pull_win  = (1 - (z[win_mask]  * win_centroid).sum(dim=-1)).mean()
+    pull_lose = (1 - (z[lose_mask] * lose_centroid).sum(dim=-1)).mean()
+
+    return pull_win + pull_lose
+
+
 def train(args):
     device = torch.device(
         "cuda" if torch.cuda.is_available()
@@ -163,6 +190,7 @@ def train(args):
             z, pred, struct = organizer(X_b)
             loss = (mse(pred, e_norm)
                     + args.contrastive_lambda * contrastive_loss(z, e_raw, margin=args.margin)
+                    + args.center_lambda * center_alignment_loss(z, e_raw)
                     + args.orth_lambda * organizer.orthogonal_penalty())
 
             opt.zero_grad()
@@ -234,6 +262,8 @@ if __name__ == "__main__":
                         help="weight for orthogonal penalty between value and structure branches")
     parser.add_argument("--contrastive_lambda", default=1.0, type=float,
                         help="weight for contrastive loss term")
+    parser.add_argument("--center_lambda", default=1.0, type=float,
+                        help="weight for center-alignment loss (pulls all win/lose to single poles)")
     parser.add_argument("--margin", default=1.5, type=float,
                         help="contrastive margin (on normalized embeddings, max=2.0)")
     parser.add_argument("--out",                default="checkpoints/organizer.pt")

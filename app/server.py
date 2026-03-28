@@ -111,18 +111,24 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
 
 
 def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
-    """Score moves by how much their latent delta aligns with the winning direction."""
-    val_weight = organizer.val_head.weight  # (1, latent_dim)
+    """Score moves by how much their val-bottleneck delta aligns with the winning direction."""
+    with torch.no_grad():
+        # effective winning direction in bottleneck space: val_head.weight (1, val_bottleneck)
+        val_weight = organizer.val_head.weight  # (1, val_bottleneck)
 
-    z_curr  = encode_position(board)     # (1, latent_dim)
-    z_nexts = encode_moves(board, moves) # (N, latent_dim)
+        z_curr  = encode_position(board)     # (1, latent_dim)
+        z_nexts = encode_moves(board, moves) # (N, latent_dim)
 
-    delta = z_nexts - z_curr             # (N, latent_dim)
+        # project through val_bottleneck to get the eval subspace
+        v_curr  = organizer.val_bottleneck(z_curr)   # (1, val_bottleneck)
+        v_nexts = organizer.val_bottleneck(z_nexts)  # (N, val_bottleneck)
 
-    delta_norm  = delta      / (delta.norm(dim=-1, keepdim=True)      + 1e-8)
-    weight_norm = val_weight / (val_weight.norm(dim=-1, keepdim=True) + 1e-8)
+        delta = v_nexts - v_curr                     # (N, val_bottleneck)
 
-    alignment = torch.matmul(delta_norm, weight_norm.T).squeeze(-1)  # (N,)
+        delta_norm  = delta      / (delta.norm(dim=-1, keepdim=True)      + 1e-8)
+        weight_norm = val_weight / (val_weight.norm(dim=-1, keepdim=True) + 1e-8)
+
+        alignment = torch.matmul(delta_norm, weight_norm.T).squeeze(-1)  # (N,)
     return alignment.tolist()
 
 
