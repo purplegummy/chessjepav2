@@ -45,8 +45,9 @@ args = parser.parse_args()
 # ─────────────────────────────────────────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────────────────────────────────────────
-N_CATS  = 8
-N_CODES = 16
+N_CATS         = 8
+N_CODES        = 16
+BOTTLENECK_TAU = 1e-5
 
 device = torch.device(args.device)
 
@@ -58,7 +59,8 @@ jepa.eval()
 for p in jepa.parameters():
     p.requires_grad_(False)
 
-encoder = jepa.encoder
+encoder    = jepa.encoder
+bottleneck = jepa.bottleneck
 predictor  = jepa.predictor
 
 print(f"Loading organizer from {args.organizer_ckpt}…")
@@ -86,7 +88,10 @@ app = Flask(
 
 
 def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
-    """Encode resulting positions as mean-pooled encoder taps: (N, 256)."""
+    """
+    Encode resulting positions as concat(bottleneck_codes, mean_pooled_taps): (N, 8448).
+    Bottleneck captures strategic concepts; taps capture tactical sharpness.
+    """
     tensors = []
     for m in moves:
         b2 = board.copy()
@@ -94,9 +99,12 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
         tensors.append(board_to_tensor(b2).float())
     batch = torch.stack(tensors).to(device)
     with torch.no_grad():
-        taps = encoder(batch)
-        h = taps[max(taps.keys())].mean(dim=1)  # (N, 64, 256) → (N, 256)
-    return h
+        taps     = encoder(batch)
+        last_tap = taps[max(taps.keys())]              # (N, 64, 256)
+        z, _     = bottleneck(last_tap, tau=BOTTLENECK_TAU)
+        codes    = z.flatten(start_dim=1)              # (N, 8192)
+        pooled   = last_tap.mean(dim=1)                # (N, 256)
+    return torch.cat([codes, pooled], dim=1)           # (N, 8448)
 
 
 def pick_move(board: chess.Board, top_n: int = 5):
@@ -104,7 +112,7 @@ def pick_move(board: chess.Board, top_n: int = 5):
     if not legal:
         return None, []
 
-    h = encode_moves(board, legal)          # (N, 256)
+    h = encode_moves(board, legal)          # (N, 8192)
     with torch.no_grad():
         _, eval_pred = organizer(h)         # (N,) current-player POV
     scores = -eval_pred                     # negate: resulting pos is opponent's turn
