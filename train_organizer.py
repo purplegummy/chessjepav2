@@ -1,6 +1,7 @@
 """
-Train the EvalOrganizer on top of frozen JEPA bottleneck codes.
-Loads board tensors and Stockfish evals directly from dataset.pt.
+Train the EvalOrganizer on top of frozen JEPA encoder taps (mean-pooled).
+Uses raw encoder output (256-dim) instead of bottleneck codes, which preserves
+material and positional information that the discrete bottleneck loses.
 
 Usage:
     python train_organizer.py \
@@ -22,24 +23,23 @@ from jepa.jepa import ChessJEPA
 from jepa.eval_organizer import EvalOrganizer
 
 
-EVAL_CLIP      = 1_500
-BOTTLENECK_TAU = 1e-5
+EVAL_CLIP = 1_500
 
 
 def encode_dataset(jepa: ChessJEPA, states: torch.Tensor, device, batch_size: int = 256):
-    """Pass all board states through the frozen JEPA encoder+bottleneck."""
+    """Pass all board states through the frozen JEPA encoder, mean-pool patches → (N, 256)."""
     jepa.eval()
-    all_z = []
+    all_h = []
     for i in range(0, len(states), batch_size):
         batch = states[i : i + batch_size].to(device)
         with torch.no_grad():
             taps = jepa.encoder(batch)
-            z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
-            # z: (B, 64, 8, 16) -> (B, 8192)
-            all_z.append(z.flatten(start_dim=1).cpu())
+            # mean-pool over patch tokens: (B, 64, 256) -> (B, 256)
+            h = taps[max(taps.keys())].mean(dim=1)
+            all_h.append(h.cpu())
         if (i // batch_size) % 10 == 0:
             print(f"  encoded {min(i + batch_size, len(states))}/{len(states)}")
-    return torch.cat(all_z)
+    return torch.cat(all_h)  # (N, 256)
 
 
 def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0.5):
@@ -87,9 +87,9 @@ def train(args):
     print(f"Loaded JEPA from {args.jepa_ckpt}")
 
     # --- encode all positions ---
-    print("Encoding positions through JEPA bottleneck...")
+    print("Encoding positions through JEPA encoder (mean-pooled taps)...")
     X = encode_dataset(jepa, states, device, batch_size=args.encode_batch)
-    print(f"Encoded: {X.shape}")  # (N, 8192)
+    print(f"Encoded: {X.shape}")  # (N, 256)
 
     evals_norm = (evals / EVAL_CLIP).clamp(-1, 1)
 

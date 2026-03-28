@@ -3,13 +3,17 @@ server.py — Flask backend for ChessJEPA GUI.
 
 Run with:
     python app/server.py \
-        --jepa_ckpt checkpoints/checkpoint_epoch5.pt
+        --jepa_ckpt      checkpoints/checkpoint_epoch5.pt \
+        --organizer_ckpt checkpoints/organizer.pt
 
 Endpoints
 ---------
 GET  /              — serves the chess UI
-POST /api/best_move — uses latent arithmetic to rank moves by embedding delta
-                      projected onto a learned "winning direction"
+POST /api/best_move — predictor-based filtering pipeline:
+                      1. Encode current position → z_t
+                      2. Run all legal moves through Predictor → imagined z_{t+1}
+                      3. Score via EvalOrganizer projected onto eval_head weight (win direction)
+                      4. Prune moves worse than current position, keep top-k for lookahead
 """
 
 import argparse
@@ -21,45 +25,57 @@ sys.path.insert(0, ROOT)
 
 import chess
 import torch
-import numpy as np
 from flask import Flask, jsonify, render_template, request
 
 from jepa.jepa import ChessJEPA
+from jepa.eval_organizer import EvalOrganizer
 from util.parse import board_to_tensor
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--jepa_ckpt", required=True)
+parser.add_argument("--jepa_ckpt",      required=True)
+parser.add_argument("--organizer_ckpt", required=True)
 parser.add_argument("--device", default="cpu")
 parser.add_argument("--host",   default="127.0.0.1")
-parser.add_argument("--port",   default=5000, type=int)
+parser.add_argument("--port",   default=5001, type=int)
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model (loaded once at startup)
+# Models
 # ─────────────────────────────────────────────────────────────────────────────
-N_CATS  = 8
-N_CODES = 16
+N_CATS         = 8
+N_CODES        = 16
 BOTTLENECK_TAU = 1e-5
 
 device = torch.device(args.device)
-print(f"Loading JEPA from {args.jepa_ckpt} on {device}…")
+
+print(f"Loading JEPA from {args.jepa_ckpt}…")
 jepa = ChessJEPA(n_cats=N_CATS, n_codes=N_CODES).to(device)
 ckpt = torch.load(args.jepa_ckpt, map_location=device)
 jepa.load_state_dict(ckpt["model_state_dict"])
 jepa.eval()
 for p in jepa.parameters():
-    p.requires_grad = False
+    p.requires_grad_(False)
 
 encoder    = jepa.encoder
 bottleneck = jepa.bottleneck
-print("Model ready.")
+predictor  = jepa.predictor
 
-# Winning direction: will be estimated lazily from the first batch of positions
-# seen, or can be set externally. Stored as a unit vector in bottleneck space.
-_win_direction: torch.Tensor | None = None
+print(f"Loading organizer from {args.organizer_ckpt}…")
+org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
+organizer = EvalOrganizer(
+    input_dim=org_ckpt["input_dim"],
+    latent_dim=org_ckpt["latent_dim"],
+    hidden_dim=org_ckpt["hidden_dim"],
+).to(device)
+organizer.load_state_dict(org_ckpt["model_state_dict"])
+organizer.eval()
+for p in organizer.parameters():
+    p.requires_grad_(False)
+
+print("Models ready.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
@@ -71,86 +87,97 @@ app = Flask(
 )
 
 
-def encode(board: chess.Board) -> torch.Tensor:
-    """Return flattened discrete bottleneck codes for a board: (64*8*16,)."""
+def board_to_z(board: chess.Board) -> torch.Tensor:
+    """Encode a board → bottleneck codes z of shape (1, 64, 8, 16)."""
     tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
     with torch.no_grad():
         taps = encoder(tensor)
         z, _ = bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
-    return z.squeeze(0).flatten()  # (8192,)
+    return z  # (1, 64, 8, 16)
 
 
-def winning_direction(boards: list[chess.Board]) -> torch.Tensor:
+def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
     """
-    Estimate the winning direction from a set of positions using material
-    difference as a proxy: mean(material>0 embeddings) - mean(material<0).
-    Returns a unit vector in embedding space.
+    Actually play each move and encode the resulting board.
+    Returns (N, 64, 8, 16) — ground truth encodings, no predictor.
     """
-    pos, neg = [], []
-    for b in boards:
-        z = encode(b)
-        mat = sum(
-            len(b.pieces(pt, chess.WHITE)) * v - len(b.pieces(pt, chess.BLACK)) * v
-            for pt, v in [(chess.PAWN,1),(chess.KNIGHT,3),(chess.BISHOP,3),
-                          (chess.ROOK,5),(chess.QUEEN,9)]
-        )
-        if mat > 0:
-            pos.append(z)
-        elif mat < 0:
-            neg.append(z)
+    tensors = []
+    for m in moves:
+        b2 = board.copy()
+        b2.push(m)
+        tensors.append(board_to_tensor(b2).float())
+    batch = torch.stack(tensors).to(device)  # (N, 17, 8, 8)
+    with torch.no_grad():
+        taps = encoder(batch)
+        z, _ = bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
+    return z  # (N, 64, 8, 16)
 
-    if not pos or not neg:
-        # fallback: random unit vector (no signal available)
-        v = torch.randn(8192, device=device)
-    else:
-        v = torch.stack(pos).mean(0) - torch.stack(neg).mean(0)
-    return v / (v.norm() + 1e-8)
+
+def score_z(z: torch.Tensor) -> torch.Tensor:
+    """
+    Score positions using organizer's eval head directly.
+    z:       (N, 64, 8, 16)
+    Returns: (N,) predicted eval normalised to [-1, 1], current-player POV
+    """
+    z_flat = z.flatten(start_dim=1)           # (N, 8192)
+    with torch.no_grad():
+        _, eval_pred = organizer(z_flat)      # (N,)
+    return eval_pred
+
+
+PIECE_VALUES = {
+    chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+    chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
+}
+
+def material_score(board: chess.Board) -> float:
+    """Material balance from white's POV, normalised to ~[-1, 1]."""
+    score = sum(
+        PIECE_VALUES[pt] * (len(board.pieces(pt, chess.WHITE)) - len(board.pieces(pt, chess.BLACK)))
+        for pt in PIECE_VALUES
+    )
+    return score / 39.0  # max material = 39 pawns worth
 
 
 def pick_move(board: chess.Board, top_n: int = 5):
     """
-    Latent arithmetic move selection.
-    Score each legal move by projecting the embedding delta
-    (z_after - z_before) onto the winning direction.
+    Hybrid scoring: material (dominant) + organizer (positional tiebreak).
+    The organizer bottleneck codes lose material info in complex positions,
+    so material is weighted heavily to prevent obvious blunders.
     """
-    global _win_direction
-
     legal = list(board.legal_moves)
     if not legal:
         return None, []
 
-    z_before = encode(board)
+    z_next_all = encode_moves(board, legal)   # (N, 64, 8, 16)
+    org_scores = score_z(z_next_all)          # (N,) current-player POV
+    org_scores = -org_scores                  # flip to current player's advantage
 
-    # Build the winning direction lazily from candidate positions
-    if _win_direction is None:
-        candidate_boards = []
-        for m in legal:
-            b2 = board.copy()
-            b2.push(m)
-            candidate_boards.append(b2)
-        _win_direction = winning_direction(candidate_boards)
-
-    # Score each move: delta projected onto winning direction
-    # Flip sign if it's black's turn (black wants to minimise white's advantage)
-    sign = 1.0 if board.turn == chess.WHITE else -1.0
-    scored = []
-    for m in legal:
+    move_scores = []
+    for i, m in enumerate(legal):
         b2 = board.copy()
         b2.push(m)
-        z_after = encode(b2)
-        score = float(sign * (z_after - z_before) @ _win_direction)
-        scored.append((m, score))
+        mat = material_score(b2)
+        if board.turn == chess.BLACK:
+            mat = -mat  # black wants negative material balance
+        org = org_scores[i].item()
+        combined = 0.8 * mat + 0.2 * org
+        move_scores.append((m, combined, mat, org))
 
-    scored.sort(key=lambda x: x[1], reverse=True)
-    best_move = scored[0][0]
+    ranked = sorted(move_scores, key=lambda x: x[1], reverse=True)
 
-    # Normalise scores to [0,1] range for display
-    raw = [s for _, s in scored]
+    print(f"\n[debug] turn={'white' if board.turn == chess.WHITE else 'black'}")
+    for m, combined, mat, org in ranked[:5]:
+        print(f"  {board.san(m):10s}  combined={combined:.3f}  mat={mat:.3f}  org={org:.3f}")
+
+    best_move = ranked[0][0]
+
+    raw = [s for _, s, _, _ in ranked]
     lo, hi = min(raw), max(raw)
     span = (hi - lo) if hi != lo else 1.0
     top_moves = [
         {"san": board.san(m), "uci": m.uci(), "prob": round((s - lo) / span, 4)}
-        for m, s in scored[:top_n]
+        for m, s, _, _ in ranked[:top_n]
     ]
 
     return best_move, top_moves
