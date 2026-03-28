@@ -1,12 +1,11 @@
 """
 Train the EvalOrganizer on top of frozen JEPA bottleneck codes.
+Loads board tensors and Stockfish evals directly from dataset.pt.
 
 Usage:
     python train_organizer.py \
-        --fens data/fen_analysis.csv \
+        --dataset  data/dataset.pt \
         --jepa_ckpt checkpoints/checkpoint_epoch5.pt \
-        --num_samples 2000 \
-        --stockfish /opt/homebrew/bin/stockfish \
         --out checkpoints/organizer.pt
 """
 
@@ -21,27 +20,37 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 
 from jepa.jepa import ChessJEPA
 from jepa.eval_organizer import EvalOrganizer
-from viz.evaluate_embeddings import load_checkpoint, load_and_encode
 
 
-EVAL_CLIP = 1_500
+EVAL_CLIP      = 1_500
+BOTTLENECK_TAU = 1e-5
 
 
-def ranking_loss(z: torch.Tensor, evals: torch.Tensor, margin: float = 0.5):
-    """
-    Margin ranking loss: positions with higher eval should project to higher
-    score along the eval direction (first dim of z as proxy, or use eval_head output).
-    Uses random pairs within the batch.
-    """
-    scores = z[:, 0]  # proxy: first latent dim acts as eval axis before training settles
-    B = z.size(0)
-    i = torch.randint(0, B, (B,), device=z.device)
-    j = torch.randint(0, B, (B,), device=z.device)
+def encode_dataset(jepa: ChessJEPA, states: torch.Tensor, device, batch_size: int = 256):
+    """Pass all board states through the frozen JEPA encoder+bottleneck."""
+    jepa.eval()
+    all_z = []
+    for i in range(0, len(states), batch_size):
+        batch = states[i : i + batch_size].to(device)
+        with torch.no_grad():
+            taps = jepa.encoder(batch)
+            z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
+            # z: (B, 64, 8, 16) -> (B, 8192)
+            all_z.append(z.flatten(start_dim=1).cpu())
+        if (i // batch_size) % 10 == 0:
+            print(f"  encoded {min(i + batch_size, len(states))}/{len(states)}")
+    return torch.cat(all_z)
+
+
+def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0.5):
+    """Margin ranking loss over random pairs in the batch."""
+    B = eval_pred.size(0)
+    i = torch.randint(0, B, (B,), device=eval_pred.device)
+    j = torch.randint(0, B, (B,), device=eval_pred.device)
     target = torch.sign(evals[i] - evals[j])
-    loss = nn.functional.margin_ranking_loss(
-        scores[i], scores[j], target, margin=margin, reduction="mean"
+    return nn.functional.margin_ranking_loss(
+        eval_pred[i], eval_pred[j], target, margin=margin, reduction="mean"
     )
-    return loss
 
 
 def train(args):
@@ -52,23 +61,37 @@ def train(args):
     )
     print(f"Device: {device}")
 
-    # --- load JEPA (frozen) and encode positions ---
+    # --- load dataset ---
+    print(f"Loading dataset from {args.dataset}...")
+    data = torch.load(args.dataset, map_location="cpu", weights_only=True)
+
+    if "evals" not in data:
+        raise ValueError("dataset.pt has no 'evals' key — rebuild with --stockfish flag")
+
+    states = data["states"].float()   # (N, 17, 8, 8)
+    evals  = data["evals"].float()    # (N,) int16 -> float
+
+    if args.num_samples:
+        idx = torch.randperm(len(states))[:args.num_samples]
+        states, evals = states[idx], evals[idx]
+
+    print(f"Dataset: {len(states)} positions")
+
+    # --- load JEPA (frozen) ---
     jepa = ChessJEPA().to(device)
-    jepa = load_checkpoint(jepa, args.jepa_ckpt, device)
+    ckpt = torch.load(args.jepa_ckpt, map_location=device)
+    jepa.load_state_dict(ckpt["model_state_dict"])
     jepa.eval()
     for p in jepa.parameters():
         p.requires_grad_(False)
+    print(f"Loaded JEPA from {args.jepa_ckpt}")
 
-    print(f"Encoding {args.num_samples} positions...")
-    embeddings, metadata = load_and_encode(
-        args.fens, jepa, device, args.num_samples, args.stockfish, args.depth
-    )
+    # --- encode all positions ---
+    print("Encoding positions through JEPA bottleneck...")
+    X = encode_dataset(jepa, states, device, batch_size=args.encode_batch)
+    print(f"Encoded: {X.shape}")  # (N, 8192)
 
-    X      = torch.stack(embeddings)                                          # (N, 8192)
-    evals  = torch.tensor([m["eval_cp"] for m in metadata], dtype=torch.float32)
-    evals_norm = evals / EVAL_CLIP                                            # normalise to [-1, 1]
-
-    print(f"Dataset: {len(X)} positions, input_dim={X.shape[1]}")
+    evals_norm = (evals / EVAL_CLIP).clamp(-1, 1)
 
     dataset = TensorDataset(X, evals_norm, evals)
     n_val   = max(1, int(0.2 * len(dataset)))
@@ -88,19 +111,18 @@ def train(args):
 
     opt = torch.optim.AdamW(organizer.parameters(), lr=args.lr, weight_decay=1e-4)
     mse = nn.MSELoss()
-
     best_val = float("inf")
 
     for epoch in range(1, args.epochs + 1):
         organizer.train()
         total_loss = 0.0
         for X_b, e_norm, e_raw in train_dl:
-            X_b, e_norm, e_raw = X_b.to(device), e_norm.to(device), e_raw.to(device)
-            z, pred = organizer(X_b)
+            X_b    = X_b.to(device)
+            e_norm = e_norm.to(device)
+            e_raw  = e_raw.to(device)
 
-            loss_reg  = mse(pred, e_norm)
-            loss_rank = ranking_loss(z, e_raw)
-            loss = loss_reg + args.rank_weight * loss_rank
+            z, pred = organizer(X_b)
+            loss = mse(pred, e_norm) + args.rank_weight * ranking_loss(pred, e_raw)
 
             opt.zero_grad()
             loss.backward()
@@ -112,21 +134,21 @@ def train(args):
         val_preds, val_targets = [], []
         with torch.no_grad():
             for X_b, e_norm, _ in val_dl:
-                X_b, e_norm = X_b.to(device), e_norm.to(device)
-                _, pred = organizer(X_b)
+                _, pred = organizer(X_b.to(device))
                 val_preds.append(pred.cpu())
-                val_targets.append(e_norm.cpu())
+                val_targets.append(e_norm)
 
         val_preds   = torch.cat(val_preds).numpy()
         val_targets = torch.cat(val_targets).numpy()
         val_mse     = np.mean((val_preds - val_targets) ** 2)
-        val_r2      = 1 - val_mse / np.var(val_targets)
+        val_r2      = 1 - val_mse / (np.var(val_targets) + 1e-8)
 
         print(f"Epoch {epoch:3d} | train_loss={total_loss/len(train_dl):.4f} "
               f"| val_MSE={val_mse:.4f} | val_R²={val_r2:.4f}")
 
         if val_mse < best_val:
             best_val = val_mse
+            os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
             torch.save({
                 "model_state_dict": organizer.state_dict(),
                 "latent_dim": args.latent_dim,
@@ -136,25 +158,23 @@ def train(args):
             print(f"  → saved to {args.out}")
 
     print(f"\nDone. Best val MSE: {best_val:.4f}")
-    print("To use: load EvalOrganizer, pass discrete JEPA bottleneck codes,")
-    print("        the latent z encodes eval — arithmetic in that space is meaningful.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fens",        default="data/fen_analysis.csv")
+    parser.add_argument("--dataset",      default="data/dataset.pt")
     parser.add_argument("--jepa_ckpt",   default="checkpoints/checkpoint_epoch5.pt")
-    parser.add_argument("--num_samples", default=2000, type=int)
-    parser.add_argument("--stockfish",   default="/opt/homebrew/bin/stockfish")
-    parser.add_argument("--depth",       default=12,   type=int)
-    parser.add_argument("--latent_dim",  default=128,  type=int)
-    parser.add_argument("--hidden_dim",  default=512,  type=int)
-    parser.add_argument("--epochs",      default=50,   type=int)
-    parser.add_argument("--batch_size",  default=64,   type=int)
-    parser.add_argument("--lr",          default=1e-3, type=float)
-    parser.add_argument("--rank_weight", default=0.1,  type=float,
-                        help="weight for ranking loss vs regression loss")
-    parser.add_argument("--out",         default="checkpoints/organizer.pt")
+    parser.add_argument("--num_samples",  default=None, type=int,
+                        help="subsample N positions (default: use all)")
+    parser.add_argument("--latent_dim",   default=128,  type=int)
+    parser.add_argument("--hidden_dim",   default=512,  type=int)
+    parser.add_argument("--epochs",       default=50,   type=int)
+    parser.add_argument("--batch_size",   default=256,  type=int)
+    parser.add_argument("--encode_batch", default=256,  type=int,
+                        help="batch size for encoding (tune to fit VRAM)")
+    parser.add_argument("--lr",           default=1e-3, type=float)
+    parser.add_argument("--rank_weight",  default=0.1,  type=float)
+    parser.add_argument("--out",          default="checkpoints/organizer.pt")
     args = parser.parse_args()
 
     train(args)
