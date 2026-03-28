@@ -9,7 +9,7 @@ import torch
 import numpy as np
 
 from jepa.jepa import ChessJEPA
-from jepa.eval_organizer import EvalOrganizer
+from jepa.value_head import ValueHead
 from util.parse import board_to_tensor
 
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
@@ -58,11 +58,11 @@ def load_and_encode(
     num_samples: int,
     stockfish_path: str | None = None,
     depth: int = 12,
-    organizer: EvalOrganizer | None = None,
+    value_head: ValueHead | None = None,
 ):
     """
     Reads FENs from CSV, encodes each position, returns embeddings + metadata.
-    If organizer is provided, embeddings are the organizer's latent vectors (latent_dim,).
+    If value_head is provided, embeddings are the value_head's latent vectors (latent_dim,).
     Otherwise, embeddings are the JEPA bottleneck category indices (512,).
     """
     model.eval()
@@ -85,8 +85,8 @@ def load_and_encode(
                     taps = model.encoder(tensor)
                     last_tap = taps[max(taps.keys())]  # (1, 64, 256)
 
-                    if organizer is not None:
-                        h, _, _ = organizer(last_tap)  # (1, latent_dim)
+                    if value_head is not None:
+                        h, _ = value_head(last_tap)  # (1, latent_dim)
                         h = h.squeeze(0).cpu()
                     else:
                         h = last_tap.mean(dim=1).squeeze(0).cpu()  # (256,)
@@ -109,26 +109,107 @@ def load_and_encode(
     return embeddings, metadata
 
 
+LANDMARK_POSITIONS = [
+    {
+        "label": "Mate in 1 (white)",
+        "fen":   "6R1/8/7p/8/8/8/4R3/k7 w - - 0 1",
+        "note":  "Ra2# — forced mate next move",
+        "eval_cp": 10000,
+    },
+    {
+        "label": "Mate in 1 (black)",
+        "fen":   "8/P7/8/5b2/8/3q4/8/2K5 b - - 0 1",
+        "note":  "Qd2# — forced mate next move",
+        "eval_cp": 10000,
+    },
+    {
+        "label": "White blunders queen",
+        "fen":   "rnbqkbnr/ppp1pppp/8/3p4/3P2Q1/8/PPP1PPPP/RNB1KBNR b KQkq - 0 1",
+        "note":  "White Qg4 hangs — black wins free queen",
+        "eval_cp": -900,
+    },
+    {
+        "label": "Back-rank equal",
+        "fen":   "4r1k1/5ppp/8/8/8/8/5PPP/4R1K1 w - - 0 1",
+        "note":  "Even position, both kings have air",
+        "eval_cp": 0,
+    },
+    {
+        "label": "Back-rank mate in 1 (white)",
+        "fen":   "r5k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1",
+        "note":  "Ra8# — white mates on back rank",
+        "eval_cp": 10000,
+    },
+    {
+        "label": "Back-rank mate in 1 (black)",
+        "fen":   "4r1k1/5ppp/8/8/8/8/3R1PPP/4R1K1 b - - 0 1",
+        "note":  "Rxe1# — black mates on back rank",
+        "eval_cp": 10000,
+    },
+]
+
+
+def encode_landmarks(model: ChessJEPA, device, value_head=None):
+    """Encode hardcoded landmark positions, return (embeddings, metadata)."""
+    model.eval()
+    embeddings, metadata = [], []
+    for lm in LANDMARK_POSITIONS:
+        board  = chess.Board(lm["fen"])
+        tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
+        with torch.no_grad():
+            taps     = model.encoder(tensor)
+            last_tap = taps[max(taps.keys())]
+            if value_head is not None:
+                h, _ = value_head(last_tap)
+                h = h.squeeze(0).cpu()
+            else:
+                h = last_tap.mean(dim=1).squeeze(0).cpu()
+        embeddings.append(h)
+        metadata.append({
+            "fen":           lm["fen"],
+            "label":         lm["label"],
+            "note":          lm["note"],
+            "eval_cp":       lm.get("eval_cp", 0),
+            "material_diff": material_difference(board),
+            "side_to_move":  "white" if board.turn == chess.WHITE else "black",
+            "url":           "https://lichess.org/analysis/" + lm["fen"].replace(" ", "_"),
+            "is_landmark":   True,
+        })
+    return embeddings, metadata
+
+
 def plot_umap_html(embeddings: list, metadata: list, out_path: str = "umap.html"):
     X = np.stack([e.numpy() for e in embeddings])
     import umap
     reducer = umap.UMAP(n_neighbors=3, min_dist=0.3, random_state=42)
     X_2d = reducer.fit_transform(X)
 
-    points = []
+    points    = []
+    landmarks = []
     for i, (x, y) in enumerate(X_2d):
         m = metadata[i]
-        points.append({
-            "x": float(x), "y": float(y),
-            "fen":           m["fen"],
-            "material_diff": m["material_diff"],
-            "side_to_move":  m["side_to_move"],
-            "eval_cp":       m["eval_cp"],
-            "eval_label":    m["eval_label"],
-            "url":           m["url"],
-        })
+        if m.get("is_landmark"):
+            print(f"  {m['label']:35s} x={x:.2f} y={y:.2f}")
+            landmarks.append({
+                "x":       float(x), "y": float(y),
+                "label":   m["label"],
+                "note":    m["note"],
+                "eval_cp": m["eval_cp"],
+                "url":     m["url"],
+            })
+        else:
+            points.append({
+                "x": float(x), "y": float(y),
+                "fen":           m["fen"],
+                "material_diff": m["material_diff"],
+                "side_to_move":  m["side_to_move"],
+                "eval_cp":       m["eval_cp"],
+                "eval_label":    m["eval_label"],
+                "url":           m["url"],
+            })
 
-    data_json = json.dumps(points)
+    data_json      = json.dumps(points)
+    landmarks_json = json.dumps(landmarks)
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -191,7 +272,8 @@ def plot_umap_html(embeddings: list, metadata: list, out_path: str = "umap.html"
 <canvas id="c" width="900" height="680"></canvas>
 
 <script>
-const points = {data_json};
+const points    = {data_json};
+const landmarks = {landmarks_json};
 const canvas = document.getElementById("c");
 const ctx    = canvas.getContext("2d");
 
@@ -275,12 +357,46 @@ function draw() {{
     if (id === "evalMin") document.getElementById("evalMinVal").textContent = el.value;
     if (id === "evalMax") document.getElementById("evalMaxVal").textContent = el.value;
     draw();
+    drawLandmarks();
   }});
 }});
+
+function drawStar(cx, cy, r, color) {{
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {{
+    const a1 = (i * 4 * Math.PI / 5) - Math.PI / 2;
+    const a2 = (i * 4 * Math.PI / 5 + 2 * Math.PI / 5) - Math.PI / 2;
+    const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
+    const x2 = cx + (r/2) * Math.cos(a2), y2 = cy + (r/2) * Math.sin(a2);
+    i === 0 ? ctx.moveTo(x1, y1) : ctx.lineTo(x1, y1);
+    ctx.lineTo(x2, y2);
+  }}
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = "#000";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}}
+
+function drawLandmarks() {{
+  landmarks.forEach(lm => {{
+    const x = sx(lm.x), y = sy(lm.y);
+    drawStar(x, y, 12, divergeColor(lm.eval_cp, 800));
+  }});
+}}
 
 canvas.addEventListener("click", e => {{
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  // check landmarks first
+  for (const lm of landmarks) {{
+    const dx = sx(lm.x) - mx, dy = sy(lm.y) - my;
+    if (Math.sqrt(dx*dx + dy*dy) < 14) {{
+      window.open(lm.url, "_blank");
+      return;
+    }}
+  }}
   const visible = getFiltered();
   for (const p of visible) {{
     const dx = sx(p.x) - mx, dy = sy(p.y) - my;
@@ -292,6 +408,7 @@ canvas.addEventListener("click", e => {{
 }});
 
 draw();
+drawLandmarks();
 </script>
 </body>
 </html>"""
@@ -306,8 +423,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fens",           default="data/fen_analysis.csv")
     parser.add_argument("--jepa_ckpt",      default="checkpoints/checkpoint_epoch5.pt")
-    parser.add_argument("--organizer_ckpt", default=None,
-                        help="path to organizer checkpoint — plots organizer latent space instead of JEPA bottleneck")
+    parser.add_argument("--value_head_ckpt", default=None,
+                        help="path to value_head checkpoint — plots value_head latent space instead of JEPA bottleneck")
     parser.add_argument("--num_samples",    default=200, type=int)
     parser.add_argument("--out",            default="umap.html")
     parser.add_argument("--stockfish",      default="/opt/homebrew/bin/stockfish")
@@ -318,24 +435,29 @@ if __name__ == "__main__":
     model = ChessJEPA().to(device)
     model = load_checkpoint(model, args.jepa_ckpt, device)
 
-    organizer = None
-    if args.organizer_ckpt:
-        org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
-        organizer = EvalOrganizer(
-            latent_dim=org_ckpt["latent_dim"],
-            hidden_dim=org_ckpt["hidden_dim"],
+    value_head = None
+    if args.value_head_ckpt:
+        org_ckpt  = torch.load(args.value_head_ckpt, map_location=device)
+        value_head = ValueHead(
             tap_dim=org_ckpt.get("tap_dim", 256),
-            n_patches=org_ckpt.get("n_patches", 64),
-            val_bottleneck=org_ckpt.get("val_bottleneck", 32),
+            hidden_dim=org_ckpt["hidden_dim"],
+            latent_dim=org_ckpt["latent_dim"],
         ).to(device)
-        organizer.load_state_dict(org_ckpt["model_state_dict"])
-        organizer.eval()
-        print(f"Using organizer latent space (dim={org_ckpt['latent_dim']})")
+        value_head.load_state_dict(org_ckpt["model_state_dict"])
+        value_head.eval()
+        print(f"Using value_head latent space (dim={org_ckpt['latent_dim']})")
     else:
         print("Using JEPA bottleneck indices (dim=512)")
 
     embeddings, metadata = load_and_encode(
         args.fens, model, device, args.num_samples, args.stockfish, args.depth,
-        organizer=organizer,
+        value_head=value_head,
     )
+
+    lm_embeddings, lm_metadata = encode_landmarks(model, device, value_head=value_head)
+    embeddings += lm_embeddings
+    metadata   += lm_metadata
+
+    print("\nLandmark positions in UMAP (after fit):")
+    # will be printed inside plot_umap_html after reduction
     plot_umap_html(embeddings, metadata, out_path=args.out)

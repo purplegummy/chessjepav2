@@ -3,17 +3,8 @@ server.py — Flask backend for ChessJEPA GUI.
 
 Run with:
     python app/server.py \
-        --jepa_ckpt      checkpoints/checkpoint_epoch5.pt \
-        --organizer_ckpt checkpoints/organizer.pt
-
-Endpoints
----------
-GET  /              — serves the chess UI
-POST /api/best_move — predictor-based filtering pipeline:
-                      1. Encode current position → z_t
-                      2. Run all legal moves through Predictor → imagined z_{t+1}
-                      3. Score via EvalOrganizer projected onto eval_head weight (win direction)
-                      4. Prune moves worse than current position, keep top-k for lookahead
+        --jepa_ckpt       checkpoints/checkpoint_epoch5.pt \
+        --value_head_ckpt checkpoints/value_head.pt
 """
 
 import argparse
@@ -28,15 +19,15 @@ import torch
 from flask import Flask, jsonify, render_template, request
 
 from jepa.jepa import ChessJEPA
-from jepa.eval_organizer import EvalOrganizer
+from jepa.value_head import ValueHead
 from util.parse import board_to_tensor
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--jepa_ckpt",      required=True)
-parser.add_argument("--organizer_ckpt", required=True)
+parser.add_argument("--jepa_ckpt",       required=True)
+parser.add_argument("--value_head_ckpt", required=True)
 parser.add_argument("--device", default="cpu")
 parser.add_argument("--host",   default="127.0.0.1")
 parser.add_argument("--port",   default=5001, type=int)
@@ -59,18 +50,16 @@ for p in jepa.parameters():
 
 encoder = jepa.encoder
 
-print(f"Loading organizer from {args.organizer_ckpt}…")
-org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
-organizer = EvalOrganizer(
-    latent_dim=org_ckpt["latent_dim"],
-    hidden_dim=org_ckpt["hidden_dim"],
-    tap_dim=org_ckpt.get("tap_dim", 256),
-    n_patches=org_ckpt.get("n_patches", 64),
-    val_bottleneck=org_ckpt.get("val_bottleneck", 32),
+print(f"Loading value head from {args.value_head_ckpt}…")
+vh_ckpt    = torch.load(args.value_head_ckpt, map_location=device)
+value_head = ValueHead(
+    tap_dim=vh_ckpt.get("tap_dim", 256),
+    hidden_dim=vh_ckpt["hidden_dim"],
+    latent_dim=vh_ckpt["latent_dim"],
 ).to(device)
-organizer.load_state_dict(org_ckpt["model_state_dict"])
-organizer.eval()
-for p in organizer.parameters():
+value_head.load_state_dict(vh_ckpt["model_state_dict"])
+value_head.eval()
+for p in value_head.parameters():
     p.requires_grad_(False)
 
 print("Models ready.")
@@ -85,18 +74,10 @@ app = Flask(
 )
 
 
-def encode_position(board: chess.Board) -> torch.Tensor:
-    """Encode a single position to organizer latent z: (1, latent_dim)."""
-    t = board_to_tensor(board).float().unsqueeze(0).to(device)
-    with torch.no_grad():
-        tap_dict = encoder(t)
-        last_tap = tap_dict[max(tap_dict.keys())]
-        z, _, _ = organizer(last_tap)
-    return z
 
 
-def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
-    """Encode resulting positions to organizer latent z: (N, latent_dim)."""
+def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
+    """Score each move by the value head prediction of the resulting position."""
     tensors = []
     for m in moves:
         b2 = board.copy()
@@ -106,30 +87,9 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
     with torch.no_grad():
         tap_dict = encoder(batch)
         last_tap = tap_dict[max(tap_dict.keys())]
-        z, _, _ = organizer(last_tap)
-    return z
-
-
-def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
-    """Score moves by how much their val-bottleneck delta aligns with the winning direction."""
-    with torch.no_grad():
-        # effective winning direction in bottleneck space: val_head.weight (1, val_bottleneck)
-        val_weight = organizer.val_head.weight  # (1, val_bottleneck)
-
-        z_curr  = encode_position(board)     # (1, latent_dim)
-        z_nexts = encode_moves(board, moves) # (N, latent_dim)
-
-        # project through val_bottleneck to get the eval subspace
-        v_curr  = organizer.val_bottleneck(z_curr)   # (1, val_bottleneck)
-        v_nexts = organizer.val_bottleneck(z_nexts)  # (N, val_bottleneck)
-
-        delta = v_nexts - v_curr                     # (N, val_bottleneck)
-
-        delta_norm  = delta      / (delta.norm(dim=-1, keepdim=True)      + 1e-8)
-        weight_norm = val_weight / (val_weight.norm(dim=-1, keepdim=True) + 1e-8)
-
-        alignment = torch.matmul(delta_norm, weight_norm.T).squeeze(-1)  # (N,)
-    return alignment.tolist()
+        _, pred  = value_head(last_tap)         # (N,) in [-1, 1]
+    # negate: resulting position is opponent's turn
+    return (-pred).tolist()
 
 
 def negamax(board: chess.Board, depth: int) -> float:
