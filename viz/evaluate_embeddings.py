@@ -88,7 +88,7 @@ def load_and_encode(
                     indices = z.argmax(dim=-1).flatten(start_dim=1)  # (1, 512)
 
                     if organizer is not None:
-                        h, _ = organizer(indices)   # (1, latent_dim)
+                        h, _, _ = organizer(indices)   # (1, latent_dim)
                         h = h.squeeze(0).cpu()
                     else:
                         h = indices.squeeze(0).float().cpu()  # (512,)

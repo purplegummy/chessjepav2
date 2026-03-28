@@ -107,7 +107,7 @@ def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
     """Score a list of moves from the current player's POV."""
     codes = encode_moves(board, moves)
     with torch.no_grad():
-        _, eval_pred = organizer(codes)
+        _, eval_pred, _ = organizer(codes)
     return (-eval_pred).tolist()  # negate: resulting pos is opponent's turn
 
 

@@ -34,7 +34,7 @@ def score_fen(fen, jepa, organizer, device):
         taps = jepa.encoder(tensor)
         z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
         z_flat = z.flatten(start_dim=1)
-        _, eval_pred = organizer(z_flat)
+        _, eval_pred, _ = organizer(z_flat)
     return eval_pred.item(), board
 
 def main():
@@ -58,7 +58,7 @@ def main():
             taps    = tap_dict[max(tap_dict.keys())]
             z, _    = jepa.bottleneck(taps, tau=BOTTLENECK_TAU)
             indices = z.argmax(dim=-1).flatten(start_dim=1)  # (1, 512)
-            latent, eval_pred = organizer(indices)
+            latent, eval_pred, _ = organizer(indices)
             proj = (latent @ win_dir).item()
         return eval_pred.item(), proj
 

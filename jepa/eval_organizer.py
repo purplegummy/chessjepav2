@@ -36,7 +36,10 @@ class EvalOrganizer(nn.Module):
     def forward(self, x: torch.Tensor):
         """x: (B, 512) int64 — category indices."""
         e = self.embedding(x)              # (B, 512, embed_dim)
-        e = e.flatten(start_dim=1)         # (B, 512 * embed_dim)
-        z = self.mlp(e)                    # (B, latent_dim)
+        e_flat = e.flatten(start_dim=1)    # (B, 512 * embed_dim)
+        z = self.mlp(e_flat)               # (B, latent_dim)
         eval_pred = self.eval_head(z).squeeze(-1)  # (B,)
-        return z, eval_pred
+        # e_pooled: mean over tokens — used for contrastive loss in training
+        # operates in embedding space, insulating the regression head from geometry pressure
+        e_pooled = e.mean(dim=1)           # (B, embed_dim)
+        return z, eval_pred, e_pooled

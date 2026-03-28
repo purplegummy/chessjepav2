@@ -60,33 +60,32 @@ def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0
     )
 
 
-def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
+def contrastive_loss(e_pooled: torch.Tensor, evals: torch.Tensor,
                      win_thresh: float = 150, lose_thresh: float = -150,
                      margin: float = 1.0):
     """
-    Pull winning positions together and losing positions together in latent space.
-    Push winning away from losing.
-    Only operates on positions clearly in one camp (>win_thresh or <lose_thresh).
+    Contrastive loss on the embedding layer's mean-pooled output.
+    Operates before the MLP, so it organizes the bottleneck embedding space
+    without interfering with the regression head.
     """
     win_mask  = evals >  win_thresh
     lose_mask = evals < lose_thresh
 
     if win_mask.sum() < 2 or lose_mask.sum() < 2:
-        return torch.tensor(0.0, device=z.device)
+        return torch.tensor(0.0, device=e_pooled.device)
 
-    z_win  = z[win_mask]
-    z_lose = z[lose_mask]
+    e_win  = e_pooled[win_mask]
+    e_lose = e_pooled[lose_mask]
 
     # Pull: minimise intra-class distance
-    pull_win  = torch.pdist(z_win).mean()
-    pull_lose = torch.pdist(z_lose).mean()
+    pull_win  = torch.pdist(e_win).mean()
+    pull_lose = torch.pdist(e_lose).mean()
 
-    # Push: maximise inter-class distance (hinge)
-    # sample cross-class pairs
-    n = min(len(z_win), len(z_lose), 64)
-    idx_w = torch.randperm(len(z_win),  device=z.device)[:n]
-    idx_l = torch.randperm(len(z_lose), device=z.device)[:n]
-    dists = torch.norm(z_win[idx_w] - z_lose[idx_l], dim=1)
+    # Push: hinge on cross-class pairs
+    n = min(len(e_win), len(e_lose), 64)
+    idx_w = torch.randperm(len(e_win),  device=e_pooled.device)[:n]
+    idx_l = torch.randperm(len(e_lose), device=e_pooled.device)[:n]
+    dists = torch.norm(e_win[idx_w] - e_lose[idx_l], dim=1)
     push  = torch.clamp(margin - dists, min=0).mean()
 
     return pull_win + pull_lose + push
@@ -159,10 +158,10 @@ def train(args):
             e_norm = e_norm.to(device)
             e_raw  = e_raw.to(device)
 
-            z, pred = organizer(X_b)
+            z, pred, e_pooled = organizer(X_b)
             loss = (mse(pred, e_norm)
                     + args.rank_weight * ranking_loss(pred, e_raw)
-                    + args.contrastive_weight * contrastive_loss(z, e_raw))
+                    + args.contrastive_weight * contrastive_loss(e_pooled, e_raw))
 
             opt.zero_grad()
             loss.backward()
@@ -174,7 +173,7 @@ def train(args):
         val_preds, val_targets = [], []
         with torch.no_grad():
             for X_b, e_norm, _ in val_dl:
-                _, pred = organizer(X_b.to(device))
+                _, pred, _ = organizer(X_b.to(device))
                 val_preds.append(pred.cpu())
                 val_targets.append(e_norm)
 
@@ -213,7 +212,7 @@ if __name__ == "__main__":
                         help="batch size for encoding (tune to fit VRAM)")
     parser.add_argument("--lr",           default=1e-3, type=float)
     parser.add_argument("--rank_weight",        default=0.5,  type=float)
-    parser.add_argument("--contrastive_weight", default=0.5,  type=float)
+    parser.add_argument("--contrastive_weight", default=0.05, type=float)
     parser.add_argument("--out",                default="checkpoints/organizer.pt")
     args = parser.parse_args()
 
