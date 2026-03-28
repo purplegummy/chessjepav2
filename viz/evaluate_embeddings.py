@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import csv
 import json
 import chess
+import chess.engine
 import torch
 import numpy as np
 
@@ -30,35 +31,73 @@ def material_difference(board: chess.Board) -> int:
     return score
 
 
-def load_and_encode(csv_path: str, model: ChessJEPA, device, num_samples: int):
+MATE_CP   = 10_000
+EVAL_CLIP = 1_500
+
+
+def stockfish_eval_cp(board: chess.Board, engine: chess.engine.SimpleEngine, depth: int) -> int:
+    """Centipawn eval from current player's POV, clipped to ±EVAL_CLIP."""
+    info  = engine.analyse(board, chess.engine.Limit(depth=depth))
+    score = info["score"].relative
+    if score.is_mate():
+        return MATE_CP if score.mate() > 0 else -MATE_CP
+    return max(-EVAL_CLIP, min(EVAL_CLIP, score.score()))
+
+
+def eval_to_label(cp: int) -> str:
+    if   cp >= 150:  return "winning"
+    elif cp <= -150: return "losing"
+    else:            return "equal"
+
+
+def load_and_encode(
+    csv_path: str,
+    model: ChessJEPA,
+    device,
+    num_samples: int,
+    stockfish_path: str | None = None,
+    depth: int = 12,
+):
     """
     Reads FENs from CSV, encodes each position, returns embeddings + metadata.
     """
     model.eval()
     embeddings = []
-    metadata   = []  # per-point: fen, material_diff, side_to_move, lichess_url
+    metadata   = []
 
-    with open(csv_path) as f:
-        reader = csv.DictReader(f)
-        for i, row in enumerate(reader):
-            if i >= num_samples:
-                break
-            fen   = row["FEN"]
-            board = chess.Board(fen)
-            tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
+    engine = chess.engine.SimpleEngine.popen_uci(stockfish_path) if stockfish_path else None
 
-            with torch.no_grad():
-                taps = model.encoder(tensor)
-                final_layer = max(taps.keys())
-                h = taps[final_layer].mean(dim=1).squeeze(0).cpu()  # (256,)
+    try:
+        with open(csv_path) as f:
+            reader = csv.DictReader(f)
+            for i, row in enumerate(reader):
+                if i >= num_samples:
+                    break
+                fen   = row["FEN"]
+                board = chess.Board(fen)
+                tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
 
-            embeddings.append(h)
-            metadata.append({
-                "fen":           fen,
-                "material_diff": material_difference(board),
-                "side_to_move":  "white" if board.turn == chess.WHITE else "black",
-                "url":           "https://lichess.org/analysis/" + fen.replace(" ", "_"),
-            })
+                with torch.no_grad():
+                    taps = model.encoder(tensor)
+                    final_layer = max(taps.keys())
+                    z, _ = model.bottleneck(taps[final_layer], tau=1.0)
+                    # z: (1, 64, 8, 16) -> flatten to (8192,)
+                    h = z.squeeze(0).flatten().cpu()
+
+                eval_cp = stockfish_eval_cp(board, engine, depth) if engine else 0
+
+                embeddings.append(h)
+                metadata.append({
+                    "fen":           fen,
+                    "material_diff": material_difference(board),
+                    "side_to_move":  "white" if board.turn == chess.WHITE else "black",
+                    "eval_cp":       eval_cp,
+                    "eval_label":    eval_to_label(eval_cp) if engine else "unknown",
+                    "url":           "https://lichess.org/analysis/" + fen.replace(" ", "_"),
+                })
+    finally:
+        if engine:
+            engine.quit()
 
     return embeddings, metadata
 
@@ -77,6 +116,8 @@ def plot_umap_html(embeddings: list, metadata: list, out_path: str = "umap.html"
             "fen":           m["fen"],
             "material_diff": m["material_diff"],
             "side_to_move":  m["side_to_move"],
+            "eval_cp":       m["eval_cp"],
+            "eval_label":    m["eval_label"],
             "url":           m["url"],
         })
 
@@ -101,12 +142,27 @@ def plot_umap_html(embeddings: list, metadata: list, out_path: str = "umap.html"
     <select id="colorBy">
       <option value="material_diff">Material difference</option>
       <option value="side_to_move">Side to move</option>
+      <option value="eval_cp">Stockfish eval</option>
+      <option value="eval_label">Win / Equal / Lose</option>
     </select>
   </label>
   <label>Material diff range:
     <input type="range" id="matMin" min="-20" max="20" value="-20" step="1"> <span id="matMinVal">-20</span>
     &nbsp;to&nbsp;
     <input type="range" id="matMax" min="-20" max="20" value="20"  step="1"> <span id="matMaxVal">20</span>
+  </label>
+  <label>Stockfish eval (cp):
+    <input type="range" id="evalMin" min="-1500" max="1500" value="-1500" step="50"> <span id="evalMinVal">-1500</span>
+    &nbsp;to&nbsp;
+    <input type="range" id="evalMax" min="-1500" max="1500" value="1500"  step="50"> <span id="evalMaxVal">1500</span>
+  </label>
+  <label>Position:
+    <select id="evalLabel">
+      <option value="all">All</option>
+      <option value="winning">Winning (&gt;+150cp)</option>
+      <option value="equal">Equal (±150cp)</option>
+      <option value="losing">Losing (&lt;-150cp)</option>
+    </select>
   </label>
   <label>Side:
     <select id="sideFilter">
@@ -130,25 +186,34 @@ const yMin = Math.min(...allY), yMax = Math.max(...allY);
 const sx = x => pad + (x - xMin) / (xMax - xMin) * (canvas.width  - 2*pad);
 const sy = y => pad + (y - yMin) / (yMax - yMin) * (canvas.height - 2*pad);
 
-// diverging colormap for material diff: red=black winning, blue=white winning
-function matColor(diff) {{
-  const t = Math.max(-1, Math.min(1, diff / 15));
+// diverging colormap: red=negative, blue=positive
+function divergeColor(val, scale) {{
+  const t = Math.max(-1, Math.min(1, val / scale));
   if (t >= 0) return `rgb(${{Math.round(255*(1-t))}}, ${{Math.round(255*(1-t))}}, 255)`;
   return `rgb(255, ${{Math.round(255*(1+t))}}, ${{Math.round(255*(1+t))}})`;
 }}
-const sideColor = s => s === "white" ? "#f0c040" : "#555";
+const sideColor  = s => s === "white" ? "#f0c040" : "#555";
+const labelColor = l => ({{ winning: "#4caf50", equal: "#aaa", losing: "#e53935", unknown: "#999" }})[l] || "#999";
 
 function getColor(p, colorBy) {{
-  return colorBy === "material_diff" ? matColor(p.material_diff) : sideColor(p.side_to_move);
+  if (colorBy === "material_diff") return divergeColor(p.material_diff, 15);
+  if (colorBy === "eval_cp")       return divergeColor(p.eval_cp, 800);
+  if (colorBy === "eval_label")    return labelColor(p.eval_label);
+  return sideColor(p.side_to_move);
 }}
 
 function getFiltered() {{
   const colorBy    = document.getElementById("colorBy").value;
   const matMin     = parseInt(document.getElementById("matMin").value);
   const matMax     = parseInt(document.getElementById("matMax").value);
+  const evalMin    = parseInt(document.getElementById("evalMin").value);
+  const evalMax    = parseInt(document.getElementById("evalMax").value);
+  const evalLabel  = document.getElementById("evalLabel").value;
   const sideFilter = document.getElementById("sideFilter").value;
   return points.filter(p =>
     p.material_diff >= matMin && p.material_diff <= matMax &&
+    p.eval_cp >= evalMin && p.eval_cp <= evalMax &&
+    (evalLabel  === "all" || p.eval_label  === evalLabel) &&
     (sideFilter === "all" || p.side_to_move === sideFilter)
   ).map(p => ({{ ...p, color: getColor(p, colorBy) }}));
 }}
@@ -166,11 +231,13 @@ function draw() {{
   }});
 }}
 
-["colorBy","matMin","matMax","sideFilter"].forEach(id => {{
+["colorBy","matMin","matMax","evalMin","evalMax","evalLabel","sideFilter"].forEach(id => {{
   const el = document.getElementById(id);
   el.addEventListener("input", () => {{
-    if (id === "matMin")  document.getElementById("matMinVal").textContent = el.value;
-    if (id === "matMax")  document.getElementById("matMaxVal").textContent = el.value;
+    if (id === "matMin")  document.getElementById("matMinVal").textContent  = el.value;
+    if (id === "matMax")  document.getElementById("matMaxVal").textContent  = el.value;
+    if (id === "evalMin") document.getElementById("evalMinVal").textContent = el.value;
+    if (id === "evalMax") document.getElementById("evalMaxVal").textContent = el.value;
     draw();
   }});
 }});
@@ -205,10 +272,14 @@ if __name__ == "__main__":
     parser.add_argument("--jepa_ckpt",   default="checkpoints/checkpoint_epoch4.pt")
     parser.add_argument("--num_samples", default=200, type=int)
     parser.add_argument("--out",         default="umap.html")
+    parser.add_argument("--stockfish",   default="/opt/homebrew/bin/stockfish", help="path to stockfish binary")
+    parser.add_argument("--depth",       default=12, type=int)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     model = ChessJEPA().to(device)
     model = load_checkpoint(model, args.jepa_ckpt, device)
-    embeddings, metadata = load_and_encode(args.fens, model, device, args.num_samples)
+    embeddings, metadata = load_and_encode(
+        args.fens, model, device, args.num_samples, args.stockfish, args.depth
+    )
     plot_umap_html(embeddings, metadata, out_path=args.out)

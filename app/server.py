@@ -3,13 +3,13 @@ server.py — Flask backend for ChessJEPA GUI.
 
 Run with:
     python app/server.py \
-        --jepa_ckpt    checkpoints/checkpoint_epoch4.pt \
-        --policy_ckpt  checkpoints/policy/policy_head.pt
+        --jepa_ckpt checkpoints/checkpoint_epoch5.pt
 
 Endpoints
 ---------
 GET  /              — serves the chess UI
-POST /api/best_move — runs policy head, returns best move + top moves
+POST /api/best_move — uses latent arithmetic to rank moves by embedding delta
+                      projected onto a learned "winning direction"
 """
 
 import argparse
@@ -21,19 +21,17 @@ sys.path.insert(0, ROOT)
 
 import chess
 import torch
-import torch.nn.functional as F
+import numpy as np
 from flask import Flask, jsonify, render_template, request
 
 from jepa.jepa import ChessJEPA
-from jepa.head import PolicyHead
-from util.parse import board_to_tensor, index_to_move, move_to_index
+from util.parse import board_to_tensor
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--jepa_ckpt",   required=True)
-parser.add_argument("--policy_ckpt", required=True)
+parser.add_argument("--jepa_ckpt", required=True)
 parser.add_argument("--device", default="cpu")
 parser.add_argument("--host",   default="127.0.0.1")
 parser.add_argument("--port",   default=5000, type=int)
@@ -57,13 +55,11 @@ for p in jepa.parameters():
 
 encoder    = jepa.encoder
 bottleneck = jepa.bottleneck
+print("Model ready.")
 
-print(f"Loading policy head from {args.policy_ckpt}…")
-policy_head = PolicyHead(n_cats=N_CATS, n_codes=N_CODES).to(device)
-ph_ckpt = torch.load(args.policy_ckpt, map_location=device)
-policy_head.load_state_dict(ph_ckpt["policy_head_state_dict"])
-policy_head.eval()
-print("Models ready.")
+# Winning direction: will be estimated lazily from the first batch of positions
+# seen, or can be set externally. Stored as a unit vector in bottleneck space.
+_win_direction: torch.Tensor | None = None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
@@ -75,44 +71,86 @@ app = Flask(
 )
 
 
-def pick_move(board: chess.Board, top_n: int = 5):
-    """Encode the board, run the policy head, return best legal move + top moves."""
+def encode(board: chess.Board) -> torch.Tensor:
+    """Return flattened discrete bottleneck codes for a board: (64*8*16,)."""
     tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
-
     with torch.no_grad():
         taps = encoder(tensor)
-        h = taps[max(taps.keys())]
-        z, _ = bottleneck(h, tau=BOTTLENECK_TAU)
-        logits = policy_head(z)          # (1, 4672)
-        logits = logits.squeeze(0)       # (4672,)
+        z, _ = bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
+    return z.squeeze(0).flatten()  # (8192,)
 
-    # Build legal (move, index) pairs
-    move_index_pairs = []
-    for m in board.legal_moves:
-        try:
-            move_index_pairs.append((m, move_to_index(m, board)))
-        except Exception:
-            continue
 
-    if not move_index_pairs:
+def winning_direction(boards: list[chess.Board]) -> torch.Tensor:
+    """
+    Estimate the winning direction from a set of positions using material
+    difference as a proxy: mean(material>0 embeddings) - mean(material<0).
+    Returns a unit vector in embedding space.
+    """
+    pos, neg = [], []
+    for b in boards:
+        z = encode(b)
+        mat = sum(
+            len(b.pieces(pt, chess.WHITE)) * v - len(b.pieces(pt, chess.BLACK)) * v
+            for pt, v in [(chess.PAWN,1),(chess.KNIGHT,3),(chess.BISHOP,3),
+                          (chess.ROOK,5),(chess.QUEEN,9)]
+        )
+        if mat > 0:
+            pos.append(z)
+        elif mat < 0:
+            neg.append(z)
+
+    if not pos or not neg:
+        # fallback: random unit vector (no signal available)
+        v = torch.randn(8192, device=device)
+    else:
+        v = torch.stack(pos).mean(0) - torch.stack(neg).mean(0)
+    return v / (v.norm() + 1e-8)
+
+
+def pick_move(board: chess.Board, top_n: int = 5):
+    """
+    Latent arithmetic move selection.
+    Score each legal move by projecting the embedding delta
+    (z_after - z_before) onto the winning direction.
+    """
+    global _win_direction
+
+    legal = list(board.legal_moves)
+    if not legal:
         return None, []
 
-    legal_moves   = [m   for m, _ in move_index_pairs]
-    legal_indices = [idx for _, idx in move_index_pairs]
+    z_before = encode(board)
 
-    # Mask to legal moves only
-    legal_logits = logits[legal_indices]
-    probs = F.softmax(legal_logits, dim=0).cpu().tolist()
+    # Build the winning direction lazily from candidate positions
+    if _win_direction is None:
+        candidate_boards = []
+        for m in legal:
+            b2 = board.copy()
+            b2.push(m)
+            candidate_boards.append(b2)
+        _win_direction = winning_direction(candidate_boards)
 
-    # Best move
-    best_local = max(range(len(probs)), key=lambda i: probs[i])
-    best_move  = legal_moves[best_local]
+    # Score each move: delta projected onto winning direction
+    # Flip sign if it's black's turn (black wants to minimise white's advantage)
+    sign = 1.0 if board.turn == chess.WHITE else -1.0
+    scored = []
+    for m in legal:
+        b2 = board.copy()
+        b2.push(m)
+        z_after = encode(b2)
+        score = float(sign * (z_after - z_before) @ _win_direction)
+        scored.append((m, score))
 
-    # Top-N by probability
-    ranked = sorted(zip(legal_moves, probs), key=lambda x: x[1], reverse=True)
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best_move = scored[0][0]
+
+    # Normalise scores to [0,1] range for display
+    raw = [s for _, s in scored]
+    lo, hi = min(raw), max(raw)
+    span = (hi - lo) if hi != lo else 1.0
     top_moves = [
-        {"san": board.san(m), "uci": m.uci(), "prob": round(p, 4)}
-        for m, p in ranked[:top_n]
+        {"san": board.san(m), "uci": m.uci(), "prob": round((s - lo) / span, 4)}
+        for m, s in scored[:top_n]
     ]
 
     return best_move, top_moves
