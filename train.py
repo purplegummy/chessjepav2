@@ -81,9 +81,6 @@ def log_model_info(model: ChessJEPA, device: torch.device):
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ChessJEPA(dropout=args.dropout).to(device)
-    if torch.cuda.device_count() > 1:
-        logging.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
     log_model_info(model, device)
 
     dataset = ChessDataset(args.data)
@@ -107,6 +104,10 @@ def main(args):
         start_epoch = checkpoint["epoch"] + 1
         global_step = start_epoch * (train_size // args.batch)
         logging.info(f"Resumed from {args.resume} at epoch {start_epoch}, step {global_step}")
+
+    if torch.cuda.device_count() > 1:
+        logging.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
 
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup,
