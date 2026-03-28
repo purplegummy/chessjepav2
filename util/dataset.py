@@ -19,10 +19,11 @@ def _eval_worker(args):
     Runs in a subprocess. Evaluates a chunk of FENs with its own Stockfish instance.
     Returns a list of int16 centipawn evals (current-player POV, clipped to ±EVAL_CLIP).
     """
-    fens, stockfish_path, depth = args
+    fens, stockfish_path, depth, worker_id = args
     results = []
+    n = len(fens)
     with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
-        for fen in fens:
+        for i, fen in enumerate(fens):
             board = chess.Board(fen)
             info  = engine.analyse(board, chess.engine.Limit(depth=depth))
             score = info["score"].relative  # current player's POV
@@ -31,6 +32,9 @@ def _eval_worker(args):
             else:
                 cp = score.score()
             results.append(max(-EVAL_CLIP, min(EVAL_CLIP, cp)))
+            if (i + 1) % 1000 == 0:
+                print(f"  worker {worker_id}: {i + 1}/{n} ({100*(i+1)/n:.0f}%)", flush=True)
+    print(f"  worker {worker_id}: done ({n} positions)", flush=True)
     return results
 
 
@@ -38,7 +42,7 @@ def _stockfish_evals(fens: list[str], stockfish_path: str, depth: int, n_workers
     """Parallel Stockfish eval over all FENs using n_workers subprocesses."""
     chunk_size = max(1, len(fens) // n_workers)
     chunks = [fens[i : i + chunk_size] for i in range(0, len(fens), chunk_size)]
-    tasks  = [(chunk, stockfish_path, depth) for chunk in chunks]
+    tasks  = [(chunk, stockfish_path, depth, i) for i, chunk in enumerate(chunks)]
 
     with mp.Pool(processes=len(chunks)) as pool:
         results = pool.map(_eval_worker, tasks)
@@ -109,9 +113,11 @@ def pgn_to_dataset(
 
     if stockfish_path:
         print(f"Running Stockfish (depth={depth}) on {len(fens)} positions with {workers} workers...")
+        print(f"  chunk size: ~{max(1, len(fens) // workers)} positions per worker")
+        print("  spawning workers...", flush=True)
         evals = _stockfish_evals(fens, stockfish_path, depth, workers)
         dataset["evals"] = torch.tensor(evals, dtype=torch.int16)
-        print("Stockfish evals done.")
+        print(f"Stockfish evals done. ({len(evals)} positions evaluated)")
 
     torch.save(dataset, out_path)
     print(f"Saved {len(actions)} positions from {n_games} games → {out_path}")
