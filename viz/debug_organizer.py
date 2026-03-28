@@ -24,6 +24,7 @@ def load_models(jepa_ckpt, org_ckpt, device):
         hidden_dim=org_data["hidden_dim"],
         tap_dim=org_data.get("tap_dim", 256),
         n_patches=org_data.get("n_patches", 64),
+        val_bottleneck=org_data.get("val_bottleneck", 32),
     ).to(device)
     organizer.load_state_dict(org_data["model_state_dict"])
     organizer.eval()

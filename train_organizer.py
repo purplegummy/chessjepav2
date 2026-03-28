@@ -146,6 +146,7 @@ def train(args):
         hidden_dim=args.hidden_dim,
         tap_dim=256,
         n_patches=64,
+        val_bottleneck=args.val_bottleneck,
     ).to(device)
 
     opt = torch.optim.AdamW(organizer.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -208,6 +209,7 @@ def train(args):
                 "hidden_dim": args.hidden_dim,
                 "tap_dim": 256,
                 "n_patches": 64,
+                "val_bottleneck": args.val_bottleneck,
             }, args.out)
             print(f"  → saved (sep={separation:.3f})")
 
@@ -227,6 +229,8 @@ if __name__ == "__main__":
     parser.add_argument("--encode_batch", default=256,  type=int,
                         help="batch size for encoding (tune to fit VRAM)")
     parser.add_argument("--lr",           default=1e-3, type=float)
+    parser.add_argument("--val_bottleneck", default=32, type=int,
+                        help="bottleneck dim before val_head (tightens eval concept)")
     parser.add_argument("--orth_lambda", default=0.1, type=float,
                         help="weight for orthogonal penalty between value and structure branches")
     parser.add_argument("--contrastive_lambda", default=1.0, type=float,

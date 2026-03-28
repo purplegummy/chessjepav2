@@ -178,6 +178,15 @@ def plot_umap_html(embeddings: list, metadata: list, out_path: str = "umap.html"
       <option value="black">Black to move</option>
     </select>
   </label>
+  <label>Highlight:
+    <select id="highlight">
+      <option value="none">None</option>
+      <option value="white_winning">White winning</option>
+      <option value="black_winning">Black winning</option>
+      <option value="white_losing">White losing</option>
+      <option value="black_losing">Black losing</option>
+    </select>
+  </label>
 </div>
 <canvas id="c" width="900" height="680"></canvas>
 
@@ -209,6 +218,15 @@ function getColor(p, colorBy) {{
   return sideColor(p.side_to_move);
 }}
 
+function matchesHighlight(p, highlight) {{
+  if (highlight === "none") return true;
+  if (highlight === "white_winning") return p.side_to_move === "white" && p.eval_label === "winning";
+  if (highlight === "black_winning") return p.side_to_move === "black" && p.eval_label === "winning";
+  if (highlight === "white_losing")  return p.side_to_move === "white" && p.eval_label === "losing";
+  if (highlight === "black_losing")  return p.side_to_move === "black" && p.eval_label === "losing";
+  return true;
+}}
+
 function getFiltered() {{
   const colorBy    = document.getElementById("colorBy").value;
   const matMin     = parseInt(document.getElementById("matMin").value);
@@ -217,28 +235,39 @@ function getFiltered() {{
   const evalMax    = parseInt(document.getElementById("evalMax").value);
   const evalLabel  = document.getElementById("evalLabel").value;
   const sideFilter = document.getElementById("sideFilter").value;
+  const highlight = document.getElementById("highlight").value;
   return points.filter(p =>
     p.material_diff >= matMin && p.material_diff <= matMax &&
     p.eval_cp >= evalMin && p.eval_cp <= evalMax &&
     (evalLabel  === "all" || p.eval_label  === evalLabel) &&
     (sideFilter === "all" || p.side_to_move === sideFilter)
-  ).map(p => ({{ ...p, color: getColor(p, colorBy) }}));
+  ).map(p => ({{ ...p, color: getColor(p, colorBy), highlighted: matchesHighlight(p, highlight) }}));
 }}
 
 function draw() {{
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const visible = getFiltered();
-  visible.forEach(p => {{
+  const highlight = document.getElementById("highlight").value;
+  // Draw dimmed points first, highlighted on top
+  visible.filter(p => !p.highlighted).forEach(p => {{
     ctx.beginPath();
-    ctx.arc(sx(p.x), sy(p.y), 6, 0, 2*Math.PI);
+    ctx.arc(sx(p.x), sy(p.y), 5, 0, 2*Math.PI);
     ctx.fillStyle = p.color;
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = highlight === "none" ? 0.85 : 0.15;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }});
+  visible.filter(p => p.highlighted).forEach(p => {{
+    ctx.beginPath();
+    ctx.arc(sx(p.x), sy(p.y), 7, 0, 2*Math.PI);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = 1.0;
     ctx.fill();
     ctx.globalAlpha = 1;
   }});
 }}
 
-["colorBy","matMin","matMax","evalMin","evalMax","evalLabel","sideFilter"].forEach(id => {{
+["colorBy","matMin","matMax","evalMin","evalMax","evalLabel","sideFilter","highlight"].forEach(id => {{
   const el = document.getElementById(id);
   el.addEventListener("input", () => {{
     if (id === "matMin")  document.getElementById("matMinVal").textContent  = el.value;
@@ -297,6 +326,7 @@ if __name__ == "__main__":
             hidden_dim=org_ckpt["hidden_dim"],
             tap_dim=org_ckpt.get("tap_dim", 256),
             n_patches=org_ckpt.get("n_patches", 64),
+            val_bottleneck=org_ckpt.get("val_bottleneck", 32),
         ).to(device)
         organizer.load_state_dict(org_ckpt["model_state_dict"])
         organizer.eval()

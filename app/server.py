@@ -66,6 +66,7 @@ organizer = EvalOrganizer(
     hidden_dim=org_ckpt["hidden_dim"],
     tap_dim=org_ckpt.get("tap_dim", 256),
     n_patches=org_ckpt.get("n_patches", 64),
+    val_bottleneck=org_ckpt.get("val_bottleneck", 32),
 ).to(device)
 organizer.load_state_dict(org_ckpt["model_state_dict"])
 organizer.eval()
