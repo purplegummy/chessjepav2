@@ -9,6 +9,7 @@ import torch
 import numpy as np
 
 from jepa.jepa import ChessJEPA
+from jepa.eval_organizer import EvalOrganizer
 from util.parse import board_to_tensor
 
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
@@ -57,9 +58,12 @@ def load_and_encode(
     num_samples: int,
     stockfish_path: str | None = None,
     depth: int = 12,
+    organizer: EvalOrganizer | None = None,
 ):
     """
     Reads FENs from CSV, encodes each position, returns embeddings + metadata.
+    If organizer is provided, embeddings are the organizer's latent vectors (latent_dim,).
+    Otherwise, embeddings are the JEPA bottleneck category indices (512,).
     """
     model.eval()
     embeddings = []
@@ -81,8 +85,13 @@ def load_and_encode(
                     taps = model.encoder(tensor)
                     final_layer = max(taps.keys())
                     z, _ = model.bottleneck(taps[final_layer], tau=1.0)
-                    # z: (1, 64, 8, 16) -> flatten to (8192,)
-                    h = z.squeeze(0).flatten().cpu()
+                    indices = z.argmax(dim=-1).flatten(start_dim=1)  # (1, 512)
+
+                    if organizer is not None:
+                        h, _ = organizer(indices)   # (1, latent_dim)
+                        h = h.squeeze(0).cpu()
+                    else:
+                        h = indices.squeeze(0).float().cpu()  # (512,)
 
                 eval_cp = stockfish_eval_cp(board, engine, depth) if engine else 0
 
@@ -268,18 +277,35 @@ draw();
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fens",        default="data/fen_analysis.csv")
-    parser.add_argument("--jepa_ckpt",   default="checkpoints/checkpoint_epoch4.pt")
-    parser.add_argument("--num_samples", default=200, type=int)
-    parser.add_argument("--out",         default="umap.html")
-    parser.add_argument("--stockfish",   default="/opt/homebrew/bin/stockfish", help="path to stockfish binary")
-    parser.add_argument("--depth",       default=12, type=int)
+    parser.add_argument("--fens",           default="data/fen_analysis.csv")
+    parser.add_argument("--jepa_ckpt",      default="checkpoints/checkpoint_epoch5.pt")
+    parser.add_argument("--organizer_ckpt", default=None,
+                        help="path to organizer checkpoint — plots organizer latent space instead of JEPA bottleneck")
+    parser.add_argument("--num_samples",    default=200, type=int)
+    parser.add_argument("--out",            default="umap.html")
+    parser.add_argument("--stockfish",      default="/opt/homebrew/bin/stockfish")
+    parser.add_argument("--depth",          default=12, type=int)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     model = ChessJEPA().to(device)
     model = load_checkpoint(model, args.jepa_ckpt, device)
+
+    organizer = None
+    if args.organizer_ckpt:
+        org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
+        organizer = EvalOrganizer(
+            latent_dim=org_ckpt["latent_dim"],
+            hidden_dim=org_ckpt["hidden_dim"],
+        ).to(device)
+        organizer.load_state_dict(org_ckpt["model_state_dict"])
+        organizer.eval()
+        print(f"Using organizer latent space (dim={org_ckpt['latent_dim']})")
+    else:
+        print("Using JEPA bottleneck indices (dim=512)")
+
     embeddings, metadata = load_and_encode(
-        args.fens, model, device, args.num_samples, args.stockfish, args.depth
+        args.fens, model, device, args.num_samples, args.stockfish, args.depth,
+        organizer=organizer,
     )
     plot_umap_html(embeddings, metadata, out_path=args.out)

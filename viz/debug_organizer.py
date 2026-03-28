@@ -55,10 +55,10 @@ def main():
         tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
         with torch.no_grad():
             tap_dict = jepa.encoder(tensor)
-            last_tap = tap_dict[max(tap_dict.keys())]  # (1, 64, 256)
-            z, _     = jepa.bottleneck(last_tap, tau=BOTTLENECK_TAU)
-            codes    = z.flatten(start_dim=1)          # (1, 8192)
-            latent, eval_pred = organizer(codes, last_tap)
+            taps    = tap_dict[max(tap_dict.keys())]
+            z, _    = jepa.bottleneck(taps, tau=BOTTLENECK_TAU)
+            indices = z.argmax(dim=-1).flatten(start_dim=1)  # (1, 512)
+            latent, eval_pred = organizer(indices)
             proj = (latent @ win_dir).item()
         return eval_pred.item(), proj
 

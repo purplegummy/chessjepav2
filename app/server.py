@@ -40,6 +40,8 @@ parser.add_argument("--organizer_ckpt", required=True)
 parser.add_argument("--device", default="cpu")
 parser.add_argument("--host",   default="127.0.0.1")
 parser.add_argument("--port",   default=5001, type=int)
+parser.add_argument("--top_k",  default=3, type=int, help="moves kept per ply for lookahead")
+parser.add_argument("--depth",  default=2, type=int, help="lookahead depth")
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,12 +88,8 @@ app = Flask(
 )
 
 
-def encode_moves(board: chess.Board, moves: list[chess.Move]):
-    """
-    Returns (codes, taps) for all resulting positions.
-      codes: (N, 8192)    — bottleneck one-hots (strategic)
-      taps:  (N, 64, 256) — raw patch tokens (spatial/tactical)
-    """
+def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
+    """Encode resulting positions as category indices: (N, 512) int64."""
     tensors = []
     for m in moves:
         b2 = board.copy()
@@ -100,10 +98,42 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]):
     batch = torch.stack(tensors).to(device)
     with torch.no_grad():
         tap_dict = encoder(batch)
-        last_tap = tap_dict[max(tap_dict.keys())]      # (N, 64, 256)
+        last_tap = tap_dict[max(tap_dict.keys())]
         z, _     = bottleneck(last_tap, tau=BOTTLENECK_TAU)
-        codes    = z.flatten(start_dim=1)              # (N, 8192)
-    return codes, last_tap
+    return z.argmax(dim=-1).flatten(start_dim=1)  # (N, 512)
+
+
+def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
+    """Score a list of moves from the current player's POV."""
+    codes = encode_moves(board, moves)
+    with torch.no_grad():
+        _, eval_pred = organizer(codes)
+    return (-eval_pred).tolist()  # negate: resulting pos is opponent's turn
+
+
+def negamax(board: chess.Board, depth: int) -> float:
+    """
+    Negamax: always returns best score from the current player's POV.
+    Uses organizer eval on resulting positions, keeps top_k survivors per ply.
+    """
+    legal = list(board.legal_moves)
+    if not legal or depth == 0:
+        if not legal:
+            return 0.0
+        scores = score_moves(board, legal)
+        return max(scores)
+
+    scores = score_moves(board, legal)
+    ranked = sorted(zip(legal, scores), key=lambda x: x[1], reverse=True)
+    survivors = ranked[:args.top_k]
+
+    best = float("-inf")
+    for m, _ in survivors:
+        b2 = board.copy()
+        b2.push(m)
+        score = -negamax(b2, depth - 1)
+        best = max(best, score)
+    return best
 
 
 def pick_move(board: chess.Board, top_n: int = 5):
@@ -111,16 +141,25 @@ def pick_move(board: chess.Board, top_n: int = 5):
     if not legal:
         return None, []
 
-    codes, taps = encode_moves(board, legal)
-    with torch.no_grad():
-        _, eval_pred = organizer(codes, taps)   # (N,) current-player POV
-    scores = -eval_pred                         # negate: resulting pos is opponent's turn
-
-    ranked = sorted(zip(legal, scores.tolist()), key=lambda x: x[1], reverse=True)
+    scores = score_moves(board, legal)
+    ranked = sorted(zip(legal, scores), key=lambda x: x[1], reverse=True)
 
     print(f"\n[debug] turn={'white' if board.turn == chess.WHITE else 'black'}")
     for m, s in ranked[:5]:
         print(f"  {board.san(m):10s}  score={s:.4f}")
+
+    if args.depth > 1:
+        survivors = ranked[:args.top_k]
+        final = []
+        for m, s in survivors:
+            b2 = board.copy()
+            b2.push(m)
+            lookahead = -negamax(b2, args.depth - 1)
+            final.append((m, lookahead))
+        # merge: survivors with lookahead score + rest with single-ply score
+        survivor_uci = {m.uci() for m, _ in survivors}
+        final += [(m, s) for m, s in ranked if m.uci() not in survivor_uci]
+        ranked = sorted(final, key=lambda x: x[1], reverse=True)
 
     best_move = ranked[0][0]
 

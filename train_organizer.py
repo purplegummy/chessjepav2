@@ -29,23 +29,24 @@ BOTTLENECK_TAU = 1e-5
 
 def encode_dataset(jepa: ChessJEPA, states: torch.Tensor, device, batch_size: int = 256):
     """
-    Returns (codes, taps):
-      codes: (N, 8192)   — flattened bottleneck one-hots (strategic)
-      taps:  (N, 64, 256) — raw patch tokens (spatial/tactical)
+    Returns integer category indices: (N, 512)
+    Each position → 64 patches × 8 categories, each index in [0, 15].
+    Far more compact than one-hot (8192) — the EvalOrganizer embeds these.
     """
     jepa.eval()
-    all_codes, all_taps = [], []
+    all_indices = []
     for i in range(0, len(states), batch_size):
         batch = states[i : i + batch_size].to(device)
         with torch.no_grad():
             tap_dict = jepa.encoder(batch)
-            last_tap = tap_dict[max(tap_dict.keys())]      # (B, 64, 256)
+            last_tap = tap_dict[max(tap_dict.keys())]
             z, _     = jepa.bottleneck(last_tap, tau=BOTTLENECK_TAU)
-            all_codes.append(z.flatten(start_dim=1).cpu()) # (B, 8192)
-            all_taps.append(last_tap.cpu())                # (B, 64, 256)
+            # z: (B, 64, 8, 16) → argmax over codes → (B, 64, 8) → flatten → (B, 512)
+            indices = z.argmax(dim=-1).flatten(start_dim=1)
+            all_indices.append(indices.cpu())
         if (i // batch_size) % 10 == 0:
             print(f"  encoded {min(i + batch_size, len(states))}/{len(states)}")
-    return torch.cat(all_codes), torch.cat(all_taps)
+    return torch.cat(all_indices)  # (N, 512) int64
 
 
 def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0.5):
@@ -93,13 +94,13 @@ def train(args):
     print(f"Loaded JEPA from {args.jepa_ckpt}")
 
     # --- encode all positions ---
-    print("Encoding positions (bottleneck codes + spatial tap tokens)...")
-    codes, taps = encode_dataset(jepa, states, device, batch_size=args.encode_batch)
-    print(f"  codes: {codes.shape}  taps: {taps.shape}")
+    print("Encoding positions through JEPA bottleneck...")
+    X = encode_dataset(jepa, states, device, batch_size=args.encode_batch)
+    print(f"Encoded: {X.shape}")
 
     evals_norm = (evals / EVAL_CLIP).clamp(-1, 1)
 
-    dataset = TensorDataset(codes, taps, evals_norm, evals)
+    dataset = TensorDataset(X, evals_norm, evals)
     n_val   = max(1, int(0.2 * len(dataset)))
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(dataset, [n_train, n_val],
@@ -121,13 +122,12 @@ def train(args):
     for epoch in range(1, args.epochs + 1):
         organizer.train()
         total_loss = 0.0
-        for codes_b, taps_b, e_norm, e_raw in train_dl:
-            codes_b = codes_b.to(device)
-            taps_b  = taps_b.to(device)
-            e_norm  = e_norm.to(device)
-            e_raw   = e_raw.to(device)
+        for X_b, e_norm, e_raw in train_dl:
+            X_b    = X_b.to(device)
+            e_norm = e_norm.to(device)
+            e_raw  = e_raw.to(device)
 
-            z, pred = organizer(codes_b, taps_b)
+            z, pred = organizer(X_b)
             loss = mse(pred, e_norm) + args.rank_weight * ranking_loss(pred, e_raw)
 
             opt.zero_grad()
@@ -139,8 +139,8 @@ def train(args):
         organizer.eval()
         val_preds, val_targets = [], []
         with torch.no_grad():
-            for codes_b, taps_b, e_norm, _ in val_dl:
-                _, pred = organizer(codes_b.to(device), taps_b.to(device))
+            for X_b, e_norm, _ in val_dl:
+                _, pred = organizer(X_b.to(device))
                 val_preds.append(pred.cpu())
                 val_targets.append(e_norm)
 
