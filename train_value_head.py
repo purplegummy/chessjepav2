@@ -71,7 +71,7 @@ def train(args):
 
     evals_norm = (evals / EVAL_CLIP).clamp(-1, 1)
 
-    dataset = TensorDataset(X, evals_norm)
+    dataset = TensorDataset(X, evals_norm, evals)
     n_val   = max(1, int(0.1 * len(dataset)))
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(dataset, [n_train, n_val],
@@ -90,14 +90,37 @@ def train(args):
     mse     = nn.MSELoss()
     best_val = float("inf")
 
+    def geo_loss(z, e_raw, margin=1.5, win_thresh=150, lose_thresh=-150):
+        """Contrastive + center-alignment on the unit sphere."""
+        win_mask  = e_raw >  win_thresh
+        lose_mask = e_raw < lose_thresh
+        if win_mask.sum() < 2 or lose_mask.sum() < 2:
+            return torch.tensor(0.0, device=z.device)
+        z_win, z_lose = z[win_mask], z[lose_mask]
+
+        # push inter-class pairs apart
+        n = min(len(z_win), len(z_lose), 64)
+        dists = torch.norm(z_win[torch.randperm(len(z_win))[:n]] -
+                           z_lose[torch.randperm(len(z_lose))[:n]], dim=1)
+        push = torch.clamp(margin - dists, min=0).mean()
+
+        # pull each class toward its centroid
+        wc = nn.functional.normalize(z_win.mean(0, keepdim=True), dim=-1)
+        lc = nn.functional.normalize(z_lose.mean(0, keepdim=True), dim=-1)
+        pull = (1 - (z_win  * wc).sum(-1)).mean() + \
+               (1 - (z_lose * lc).sum(-1)).mean()
+
+        return push + pull
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
-        for X_b, e_b in train_dl:
-            X_b = X_b.to(device)
-            e_b = e_b.to(device)
-            _, pred = model(X_b)
-            loss = mse(pred, e_b)
+        for X_b, e_b, e_raw in train_dl:
+            X_b   = X_b.to(device)
+            e_b   = e_b.to(device)
+            e_raw = e_raw.to(device)
+            z, pred = model(X_b)
+            loss = mse(pred, e_b) + args.geo_lambda * geo_loss(z, e_raw)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -106,7 +129,7 @@ def train(args):
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for X_b, e_b in val_dl:
+            for X_b, e_b, _ in val_dl:
                 _, pred = model(X_b.to(device))
                 val_loss += mse(pred, e_b.to(device)).item()
 
@@ -139,6 +162,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size",   default=256,  type=int)
     parser.add_argument("--encode_batch", default=256,  type=int)
     parser.add_argument("--lr",           default=1e-3, type=float)
+    parser.add_argument("--geo_lambda",   default=1.0,  type=float,
+                        help="weight for geometric (contrastive+pull) loss")
     parser.add_argument("--out",          default="checkpoints/value_head.pt")
     args = parser.parse_args()
     train(args)
