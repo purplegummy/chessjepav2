@@ -16,10 +16,9 @@ def log_step(epoch: int, batch_idx: int, loss: float, l_pred: float, l_entropy: 
     )
 
 
-def save_checkpoint(model, optimizer: torch.optim.Optimizer, epoch: int, out_path: str):
-    raw_model = model.module if isinstance(model, torch.nn.DataParallel) else model
+def save_checkpoint(model: ChessJEPA, optimizer: torch.optim.Optimizer, epoch: int, out_path: str):
     checkpoint = {
-        "model_state_dict": raw_model.state_dict(),
+        "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
     }
@@ -105,9 +104,6 @@ def main(args):
         global_step = start_epoch * (train_size // args.batch)
         logging.info(f"Resumed from {args.resume} at epoch {start_epoch}, step {global_step}")
 
-    if torch.cuda.device_count() > 1:
-        logging.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
 
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup,
