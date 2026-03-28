@@ -45,9 +45,8 @@ args = parser.parse_args()
 # ─────────────────────────────────────────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────────────────────────────────────────
-N_CATS         = 8
-N_CODES        = 16
-BOTTLENECK_TAU = 1e-5
+N_CATS  = 8
+N_CODES = 16
 
 device = torch.device(args.device)
 
@@ -59,8 +58,7 @@ jepa.eval()
 for p in jepa.parameters():
     p.requires_grad_(False)
 
-encoder    = jepa.encoder
-bottleneck = jepa.bottleneck
+encoder = jepa.encoder
 predictor  = jepa.predictor
 
 print(f"Loading organizer from {args.organizer_ckpt}…")
@@ -87,97 +85,44 @@ app = Flask(
 )
 
 
-def board_to_z(board: chess.Board) -> torch.Tensor:
-    """Encode a board → bottleneck codes z of shape (1, 64, 8, 16)."""
-    tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
-    with torch.no_grad():
-        taps = encoder(tensor)
-        z, _ = bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
-    return z  # (1, 64, 8, 16)
-
-
 def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
-    """
-    Actually play each move and encode the resulting board.
-    Returns (N, 64, 8, 16) — ground truth encodings, no predictor.
-    """
+    """Encode resulting positions as mean-pooled encoder taps: (N, 256)."""
     tensors = []
     for m in moves:
         b2 = board.copy()
         b2.push(m)
         tensors.append(board_to_tensor(b2).float())
-    batch = torch.stack(tensors).to(device)  # (N, 17, 8, 8)
+    batch = torch.stack(tensors).to(device)
     with torch.no_grad():
         taps = encoder(batch)
-        z, _ = bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
-    return z  # (N, 64, 8, 16)
-
-
-def score_z(z: torch.Tensor) -> torch.Tensor:
-    """
-    Score positions using organizer's eval head directly.
-    z:       (N, 64, 8, 16)
-    Returns: (N,) predicted eval normalised to [-1, 1], current-player POV
-    """
-    z_flat = z.flatten(start_dim=1)           # (N, 8192)
-    with torch.no_grad():
-        _, eval_pred = organizer(z_flat)      # (N,)
-    return eval_pred
-
-
-PIECE_VALUES = {
-    chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
-    chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0,
-}
-
-def material_score(board: chess.Board) -> float:
-    """Material balance from white's POV, normalised to ~[-1, 1]."""
-    score = sum(
-        PIECE_VALUES[pt] * (len(board.pieces(pt, chess.WHITE)) - len(board.pieces(pt, chess.BLACK)))
-        for pt in PIECE_VALUES
-    )
-    return score / 39.0  # max material = 39 pawns worth
+        h = taps[max(taps.keys())].mean(dim=1)  # (N, 64, 256) → (N, 256)
+    return h
 
 
 def pick_move(board: chess.Board, top_n: int = 5):
-    """
-    Hybrid scoring: material (dominant) + organizer (positional tiebreak).
-    The organizer bottleneck codes lose material info in complex positions,
-    so material is weighted heavily to prevent obvious blunders.
-    """
     legal = list(board.legal_moves)
     if not legal:
         return None, []
 
-    z_next_all = encode_moves(board, legal)   # (N, 64, 8, 16)
-    org_scores = score_z(z_next_all)          # (N,) current-player POV
-    org_scores = -org_scores                  # flip to current player's advantage
+    h = encode_moves(board, legal)          # (N, 256)
+    with torch.no_grad():
+        _, eval_pred = organizer(h)         # (N,) current-player POV
+    scores = -eval_pred                     # negate: resulting pos is opponent's turn
 
-    move_scores = []
-    for i, m in enumerate(legal):
-        b2 = board.copy()
-        b2.push(m)
-        mat = material_score(b2)
-        if board.turn == chess.BLACK:
-            mat = -mat  # black wants negative material balance
-        org = org_scores[i].item()
-        combined = 0.8 * mat + 0.2 * org
-        move_scores.append((m, combined, mat, org))
-
-    ranked = sorted(move_scores, key=lambda x: x[1], reverse=True)
+    ranked = sorted(zip(legal, scores.tolist()), key=lambda x: x[1], reverse=True)
 
     print(f"\n[debug] turn={'white' if board.turn == chess.WHITE else 'black'}")
-    for m, combined, mat, org in ranked[:5]:
-        print(f"  {board.san(m):10s}  combined={combined:.3f}  mat={mat:.3f}  org={org:.3f}")
+    for m, s in ranked[:5]:
+        print(f"  {board.san(m):10s}  score={s:.4f}")
 
     best_move = ranked[0][0]
 
-    raw = [s for _, s, _, _ in ranked]
+    raw = [s for _, s in ranked]
     lo, hi = min(raw), max(raw)
     span = (hi - lo) if hi != lo else 1.0
     top_moves = [
         {"san": board.san(m), "uci": m.uci(), "prob": round((s - lo) / span, 4)}
-        for m, s, _, _ in ranked[:top_n]
+        for m, s in ranked[:top_n]
     ]
 
     return best_move, top_moves
