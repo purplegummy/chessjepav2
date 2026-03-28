@@ -60,6 +60,38 @@ def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0
     )
 
 
+def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
+                     win_thresh: float = 150, lose_thresh: float = -150,
+                     margin: float = 1.0):
+    """
+    Pull winning positions together and losing positions together in latent space.
+    Push winning away from losing.
+    Only operates on positions clearly in one camp (>win_thresh or <lose_thresh).
+    """
+    win_mask  = evals >  win_thresh
+    lose_mask = evals < lose_thresh
+
+    if win_mask.sum() < 2 or lose_mask.sum() < 2:
+        return torch.tensor(0.0, device=z.device)
+
+    z_win  = z[win_mask]
+    z_lose = z[lose_mask]
+
+    # Pull: minimise intra-class distance
+    pull_win  = torch.pdist(z_win).mean()
+    pull_lose = torch.pdist(z_lose).mean()
+
+    # Push: maximise inter-class distance (hinge)
+    # sample cross-class pairs
+    n = min(len(z_win), len(z_lose), 64)
+    idx_w = torch.randperm(len(z_win),  device=z.device)[:n]
+    idx_l = torch.randperm(len(z_lose), device=z.device)[:n]
+    dists = torch.norm(z_win[idx_w] - z_lose[idx_l], dim=1)
+    push  = torch.clamp(margin - dists, min=0).mean()
+
+    return pull_win + pull_lose + push
+
+
 def train(args):
     device = torch.device(
         "cuda" if torch.cuda.is_available()
@@ -128,7 +160,9 @@ def train(args):
             e_raw  = e_raw.to(device)
 
             z, pred = organizer(X_b)
-            loss = mse(pred, e_norm) + args.rank_weight * ranking_loss(pred, e_raw)
+            loss = (mse(pred, e_norm)
+                    + args.rank_weight * ranking_loss(pred, e_raw)
+                    + args.contrastive_weight * contrastive_loss(z, e_raw))
 
             opt.zero_grad()
             loss.backward()
@@ -178,8 +212,9 @@ if __name__ == "__main__":
     parser.add_argument("--encode_batch", default=256,  type=int,
                         help="batch size for encoding (tune to fit VRAM)")
     parser.add_argument("--lr",           default=1e-3, type=float)
-    parser.add_argument("--rank_weight",  default=0.1,  type=float)
-    parser.add_argument("--out",          default="checkpoints/organizer.pt")
+    parser.add_argument("--rank_weight",        default=0.5,  type=float)
+    parser.add_argument("--contrastive_weight", default=0.5,  type=float)
+    parser.add_argument("--out",                default="checkpoints/organizer.pt")
     args = parser.parse_args()
 
     train(args)
