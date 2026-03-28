@@ -16,9 +16,10 @@ def log_step(epoch: int, batch_idx: int, loss: float, l_pred: float, l_entropy: 
     )
 
 
-def save_checkpoint(model: ChessJEPA, optimizer: torch.optim.Optimizer, epoch: int, out_path: str):
+def save_checkpoint(model, optimizer: torch.optim.Optimizer, epoch: int, out_path: str):
+    raw_model = model.module if isinstance(model, torch.nn.DataParallel) else model
     checkpoint = {
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": raw_model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
     }
@@ -80,6 +81,9 @@ def log_model_info(model: ChessJEPA, device: torch.device):
 def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ChessJEPA(dropout=args.dropout).to(device)
+    if torch.cuda.device_count() > 1:
+        logging.info(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
     log_model_info(model, device)
 
     dataset = ChessDataset(args.data)
@@ -91,7 +95,7 @@ def main(args):
     val_loader   = torch.utils.data.DataLoader(val_dataset,   batch_size=args.batch, shuffle=False, num_workers=4, pin_memory=True)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    total_steps = args.epochs * (train_size // args.batch)
+    total_steps = (args.total_epochs or args.epochs) * (train_size // args.batch)
     criterion = torch.nn.CrossEntropyLoss()
     global_step = 0
     start_epoch = 0
@@ -154,6 +158,8 @@ if __name__ == "__main__":
     parser.add_argument("--data",    default="data/dataset.pt")
     parser.add_argument("--out",     default="checkpoints/checkpoint.pt")
     parser.add_argument("--epochs",  default=10,                          type=int)
+    parser.add_argument("--total-epochs", default=None,                   type=int,
+                        help="Total intended training epochs for scheduler horizon (defaults to --epochs)")
     parser.add_argument("--resume",  default=None,                        type=str)
     args = parser.parse_args()
 
