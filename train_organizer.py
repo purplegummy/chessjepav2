@@ -71,10 +71,9 @@ def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
     if win_mask.sum() < 2 or lose_mask.sum() < 2:
         return torch.tensor(0.0, device=z.device)
 
-    # Normalize to unit sphere so distances are in [0, 2]
-    z_n = nn.functional.normalize(z, dim=-1)
-    z_win  = z_n[win_mask]
-    z_lose = z_n[lose_mask]
+    # z is already L2-normalized from the forward pass
+    z_win  = z[win_mask]
+    z_lose = z[lose_mask]
 
     # Pull: minimize variance around each centroid
     pull_win  = (z_win  - z_win.mean(0)).pow(2).sum(1).mean()
