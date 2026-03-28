@@ -70,6 +70,8 @@ org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
 organizer = EvalOrganizer(
     latent_dim=org_ckpt["latent_dim"],
     hidden_dim=org_ckpt["hidden_dim"],
+    tap_dim=org_ckpt.get("tap_dim", 256),
+    n_patches=org_ckpt.get("n_patches", 64),
 ).to(device)
 organizer.load_state_dict(org_ckpt["model_state_dict"])
 organizer.eval()
@@ -89,7 +91,7 @@ app = Flask(
 
 
 def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
-    """Encode resulting positions as category indices: (N, 512) int64."""
+    """Encode resulting positions as encoder taps: (N, 64, 256) float."""
     tensors = []
     for m in moves:
         b2 = board.copy()
@@ -98,9 +100,8 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
     batch = torch.stack(tensors).to(device)
     with torch.no_grad():
         tap_dict = encoder(batch)
-        last_tap = tap_dict[max(tap_dict.keys())]
-        z, _     = bottleneck(last_tap, tau=BOTTLENECK_TAU)
-    return z.argmax(dim=-1).flatten(start_dim=1)  # (N, 512)
+        last_tap = tap_dict[max(tap_dict.keys())]  # (N, 64, 256)
+    return last_tap
 
 
 def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:

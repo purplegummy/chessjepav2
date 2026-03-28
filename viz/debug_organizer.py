@@ -22,6 +22,8 @@ def load_models(jepa_ckpt, org_ckpt, device):
     organizer = EvalOrganizer(
         latent_dim=org_data["latent_dim"],
         hidden_dim=org_data["hidden_dim"],
+        tap_dim=org_data.get("tap_dim", 256),
+        n_patches=org_data.get("n_patches", 64),
     ).to(device)
     organizer.load_state_dict(org_data["model_state_dict"])
     organizer.eval()
@@ -32,9 +34,8 @@ def score_fen(fen, jepa, organizer, device):
     tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
     with torch.no_grad():
         taps = jepa.encoder(tensor)
-        z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
-        z_flat = z.flatten(start_dim=1)
-        _, eval_pred, _ = organizer(z_flat)
+        last_tap = taps[max(taps.keys())]  # (1, 64, 256)
+        _, eval_pred, _ = organizer(last_tap)
     return eval_pred.item(), board
 
 def main():
@@ -55,10 +56,8 @@ def main():
         tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
         with torch.no_grad():
             tap_dict = jepa.encoder(tensor)
-            taps    = tap_dict[max(tap_dict.keys())]
-            z, _    = jepa.bottleneck(taps, tau=BOTTLENECK_TAU)
-            indices = z.argmax(dim=-1).flatten(start_dim=1)  # (1, 512)
-            latent, eval_pred, _ = organizer(indices)
+            last_tap = tap_dict[max(tap_dict.keys())]  # (1, 64, 256)
+            latent, eval_pred, _ = organizer(last_tap)
             proj = (latent @ win_dir).item()
         return eval_pred.item(), proj
 

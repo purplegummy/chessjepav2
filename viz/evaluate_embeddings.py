@@ -83,15 +83,13 @@ def load_and_encode(
 
                 with torch.no_grad():
                     taps = model.encoder(tensor)
-                    final_layer = max(taps.keys())
-                    z, _ = model.bottleneck(taps[final_layer], tau=1.0)
-                    indices = z.argmax(dim=-1).flatten(start_dim=1)  # (1, 512)
+                    last_tap = taps[max(taps.keys())]  # (1, 64, 256)
 
                     if organizer is not None:
-                        h, _, _ = organizer(indices)   # (1, latent_dim)
+                        h, _, _ = organizer(last_tap)  # (1, latent_dim)
                         h = h.squeeze(0).cpu()
                     else:
-                        h = indices.squeeze(0).float().cpu()  # (512,)
+                        h = last_tap.mean(dim=1).squeeze(0).cpu()  # (256,)
 
                 eval_cp = stockfish_eval_cp(board, engine, depth) if engine else 0
 
@@ -297,6 +295,8 @@ if __name__ == "__main__":
         organizer = EvalOrganizer(
             latent_dim=org_ckpt["latent_dim"],
             hidden_dim=org_ckpt["hidden_dim"],
+            tap_dim=org_ckpt.get("tap_dim", 256),
+            n_patches=org_ckpt.get("n_patches", 64),
         ).to(device)
         organizer.load_state_dict(org_ckpt["model_state_dict"])
         organizer.eval()

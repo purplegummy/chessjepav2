@@ -29,24 +29,20 @@ BOTTLENECK_TAU = 1e-5
 
 def encode_dataset(jepa: ChessJEPA, states: torch.Tensor, device, batch_size: int = 256):
     """
-    Returns integer category indices: (N, 512)
-    Each position → 64 patches × 8 categories, each index in [0, 15].
-    Far more compact than one-hot (8192) — the EvalOrganizer embeds these.
+    Returns encoder taps: (N, 64, 256) float
+    Pre-bottleneck activations preserve all information the encoder learned.
     """
     jepa.eval()
-    all_indices = []
+    all_taps = []
     for i in range(0, len(states), batch_size):
         batch = states[i : i + batch_size].to(device)
         with torch.no_grad():
             tap_dict = jepa.encoder(batch)
-            last_tap = tap_dict[max(tap_dict.keys())]
-            z, _     = jepa.bottleneck(last_tap, tau=BOTTLENECK_TAU)
-            # z: (B, 64, 8, 16) → argmax over codes → (B, 64, 8) → flatten → (B, 512)
-            indices = z.argmax(dim=-1).flatten(start_dim=1)
-            all_indices.append(indices.cpu())
+            last_tap = tap_dict[max(tap_dict.keys())]  # (B, 64, 256)
+            all_taps.append(last_tap.cpu())
         if (i // batch_size) % 10 == 0:
             print(f"  encoded {min(i + batch_size, len(states))}/{len(states)}")
-    return torch.cat(all_indices)  # (N, 512) int64
+    return torch.cat(all_taps)  # (N, 64, 256) float32
 
 
 def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0.5):
@@ -148,6 +144,8 @@ def train(args):
     organizer = EvalOrganizer(
         latent_dim=args.latent_dim,
         hidden_dim=args.hidden_dim,
+        tap_dim=256,
+        n_patches=64,
     ).to(device)
 
     opt = torch.optim.AdamW(organizer.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -162,8 +160,9 @@ def train(args):
             e_norm = e_norm.to(device)
             e_raw  = e_raw.to(device)
 
-            z, pred, e_pooled = organizer(X_b)
-            loss = contrastive_loss(z, e_raw, margin=args.margin)
+            z, pred, struct = organizer(X_b)
+            loss = (mse(pred, e_norm)
+                    + args.orth_lambda * organizer.orthogonal_penalty())
 
             opt.zero_grad()
             loss.backward()
@@ -193,8 +192,9 @@ def train(args):
         else:
             separation, intra_win, intra_lose = 0.0, 0.0, 0.0
 
+        orth = organizer.orthogonal_penalty().item()
         val_loss = total_loss / len(train_dl)
-        print(f"Epoch {epoch:3d} | loss={val_loss:.4f} "
+        print(f"Epoch {epoch:3d} | loss={val_loss:.4f} | orth={orth:.4f} "
               f"| sep={separation:.3f} | intra_win={intra_win:.3f} | intra_lose={intra_lose:.3f}")
 
         # save when separation improves
@@ -205,6 +205,8 @@ def train(args):
                 "model_state_dict": organizer.state_dict(),
                 "latent_dim": args.latent_dim,
                 "hidden_dim": args.hidden_dim,
+                "tap_dim": 256,
+                "n_patches": 64,
             }, args.out)
             print(f"  → saved (sep={separation:.3f})")
 
@@ -224,8 +226,8 @@ if __name__ == "__main__":
     parser.add_argument("--encode_batch", default=256,  type=int,
                         help="batch size for encoding (tune to fit VRAM)")
     parser.add_argument("--lr",           default=1e-3, type=float)
-    parser.add_argument("--margin", default=2.0, type=float,
-                        help="contrastive margin between winning and losing clusters")
+    parser.add_argument("--orth_lambda", default=0.1, type=float,
+                        help="weight for orthogonal penalty between value and structure branches")
     parser.add_argument("--out",                default="checkpoints/organizer.pt")
     args = parser.parse_args()
 
