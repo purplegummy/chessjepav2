@@ -60,32 +60,31 @@ def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0
     )
 
 
-def contrastive_loss(e_pooled: torch.Tensor, evals: torch.Tensor,
+def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
                      win_thresh: float = 150, lose_thresh: float = -150,
-                     margin: float = 1.0):
+                     margin: float = 2.0):
     """
-    Contrastive loss on the embedding layer's mean-pooled output.
-    Operates before the MLP, so it organizes the bottleneck embedding space
-    without interfering with the regression head.
+    Organizes latent space geometry by eval label:
+      - Pull winning positions together
+      - Pull losing positions together
+      - Push winning cluster away from losing cluster
     """
     win_mask  = evals >  win_thresh
     lose_mask = evals < lose_thresh
 
     if win_mask.sum() < 2 or lose_mask.sum() < 2:
-        return torch.tensor(0.0, device=e_pooled.device)
+        return torch.tensor(0.0, device=z.device)
 
-    e_win  = e_pooled[win_mask]
-    e_lose = e_pooled[lose_mask]
+    z_win  = z[win_mask]
+    z_lose = z[lose_mask]
 
-    # Pull: minimise intra-class distance
-    pull_win  = torch.pdist(e_win).mean()
-    pull_lose = torch.pdist(e_lose).mean()
+    pull_win  = torch.pdist(z_win).mean()
+    pull_lose = torch.pdist(z_lose).mean()
 
-    # Push: hinge on cross-class pairs
-    n = min(len(e_win), len(e_lose), 64)
-    idx_w = torch.randperm(len(e_win),  device=e_pooled.device)[:n]
-    idx_l = torch.randperm(len(e_lose), device=e_pooled.device)[:n]
-    dists = torch.norm(e_win[idx_w] - e_lose[idx_l], dim=1)
+    n = min(len(z_win), len(z_lose), 64)
+    idx_w = torch.randperm(len(z_win),  device=z.device)[:n]
+    idx_l = torch.randperm(len(z_lose), device=z.device)[:n]
+    dists = torch.norm(z_win[idx_w] - z_lose[idx_l], dim=1)
     push  = torch.clamp(margin - dists, min=0).mean()
 
     return pull_win + pull_lose + push
@@ -148,7 +147,7 @@ def train(args):
 
     opt = torch.optim.AdamW(organizer.parameters(), lr=args.lr, weight_decay=1e-4)
     mse = nn.MSELoss()
-    best_val = float("inf")
+    best_val = 0.0
 
     for epoch in range(1, args.epochs + 1):
         organizer.train()
@@ -159,43 +158,52 @@ def train(args):
             e_raw  = e_raw.to(device)
 
             z, pred, e_pooled = organizer(X_b)
-            loss = (mse(pred, e_norm)
-                    + args.rank_weight * ranking_loss(pred, e_raw)
-                    + args.contrastive_weight * contrastive_loss(e_pooled, e_raw))
+            loss = contrastive_loss(z, e_raw)
 
             opt.zero_grad()
             loss.backward()
             opt.step()
             total_loss += loss.item()
 
-        # validation
+        # validation: measure cluster separation (higher = better geometry)
         organizer.eval()
-        val_preds, val_targets = [], []
+        val_z, val_e = [], []
         with torch.no_grad():
-            for X_b, e_norm, _ in val_dl:
-                _, pred, _ = organizer(X_b.to(device))
-                val_preds.append(pred.cpu())
-                val_targets.append(e_norm)
+            for X_b, _, e_raw in val_dl:
+                z, _, _ = organizer(X_b.to(device))
+                val_z.append(z.cpu())
+                val_e.append(e_raw)
 
-        val_preds   = torch.cat(val_preds).numpy()
-        val_targets = torch.cat(val_targets).numpy()
-        val_mse     = np.mean((val_preds - val_targets) ** 2)
-        val_r2      = 1 - val_mse / (np.var(val_targets) + 1e-8)
+        val_z = torch.cat(val_z)
+        val_e = torch.cat(val_e)
 
-        print(f"Epoch {epoch:3d} | train_loss={total_loss/len(train_dl):.4f} "
-              f"| val_MSE={val_mse:.4f} | val_R²={val_r2:.4f}")
+        z_win  = val_z[val_e >  150]
+        z_lose = val_z[val_e < -150]
+        if len(z_win) > 0 and len(z_lose) > 0:
+            win_centroid  = z_win.mean(0)
+            lose_centroid = z_lose.mean(0)
+            separation = torch.norm(win_centroid - lose_centroid).item()
+            intra_win  = torch.pdist(z_win[:256]).mean().item()  if len(z_win)  > 1 else 0
+            intra_lose = torch.pdist(z_lose[:256]).mean().item() if len(z_lose) > 1 else 0
+        else:
+            separation, intra_win, intra_lose = 0.0, 0.0, 0.0
 
-        if val_mse < best_val:
-            best_val = val_mse
+        val_loss = total_loss / len(train_dl)
+        print(f"Epoch {epoch:3d} | loss={val_loss:.4f} "
+              f"| sep={separation:.3f} | intra_win={intra_win:.3f} | intra_lose={intra_lose:.3f}")
+
+        # save when separation improves
+        if separation > best_val:
+            best_val = separation
             os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
             torch.save({
                 "model_state_dict": organizer.state_dict(),
                 "latent_dim": args.latent_dim,
                 "hidden_dim": args.hidden_dim,
             }, args.out)
-            print(f"  → saved to {args.out}")
+            print(f"  → saved (sep={separation:.3f})")
 
-    print(f"\nDone. Best val MSE: {best_val:.4f}")
+    print(f"\nDone. Best separation: {best_val:.4f}")
 
 
 if __name__ == "__main__":
@@ -211,8 +219,8 @@ if __name__ == "__main__":
     parser.add_argument("--encode_batch", default=256,  type=int,
                         help="batch size for encoding (tune to fit VRAM)")
     parser.add_argument("--lr",           default=1e-3, type=float)
-    parser.add_argument("--rank_weight",        default=0.5,  type=float)
-    parser.add_argument("--contrastive_weight", default=0.05, type=float)
+    parser.add_argument("--margin", default=2.0, type=float,
+                        help="contrastive margin between winning and losing clusters")
     parser.add_argument("--out",                default="checkpoints/organizer.pt")
     args = parser.parse_args()
 
