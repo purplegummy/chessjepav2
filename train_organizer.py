@@ -29,26 +29,23 @@ BOTTLENECK_TAU = 1e-5
 
 def encode_dataset(jepa: ChessJEPA, states: torch.Tensor, device, batch_size: int = 256):
     """
-    Encode positions as concat(bottleneck_codes, mean_pooled_taps).
-    bottleneck: (B, 64, 8, 16) → flatten → (B, 8192)  — strategic concepts
-    taps:       (B, 64, 256)   → mean    → (B, 256)    — tactical sharpness
-    output:     (B, 8448)
+    Returns (codes, taps):
+      codes: (N, 8192)   — flattened bottleneck one-hots (strategic)
+      taps:  (N, 64, 256) — raw patch tokens (spatial/tactical)
     """
     jepa.eval()
-    all_h = []
+    all_codes, all_taps = [], []
     for i in range(0, len(states), batch_size):
         batch = states[i : i + batch_size].to(device)
         with torch.no_grad():
-            taps     = jepa.encoder(batch)
-            last_tap = taps[max(taps.keys())]              # (B, 64, 256)
+            tap_dict = jepa.encoder(batch)
+            last_tap = tap_dict[max(tap_dict.keys())]      # (B, 64, 256)
             z, _     = jepa.bottleneck(last_tap, tau=BOTTLENECK_TAU)
-            codes    = z.flatten(start_dim=1)              # (B, 8192)
-            pooled   = last_tap.mean(dim=1)                # (B, 256)
-            h        = torch.cat([codes, pooled], dim=1)  # (B, 8448)
-            all_h.append(h.cpu())
+            all_codes.append(z.flatten(start_dim=1).cpu()) # (B, 8192)
+            all_taps.append(last_tap.cpu())                # (B, 64, 256)
         if (i // batch_size) % 10 == 0:
             print(f"  encoded {min(i + batch_size, len(states))}/{len(states)}")
-    return torch.cat(all_h)  # (N, 8448)
+    return torch.cat(all_codes), torch.cat(all_taps)
 
 
 def ranking_loss(eval_pred: torch.Tensor, evals: torch.Tensor, margin: float = 0.5):
@@ -96,13 +93,13 @@ def train(args):
     print(f"Loaded JEPA from {args.jepa_ckpt}")
 
     # --- encode all positions ---
-    print("Encoding positions (bottleneck codes + mean-pooled taps)...")
-    X = encode_dataset(jepa, states, device, batch_size=args.encode_batch)
-    print(f"Encoded: {X.shape}")  # (N, 8448)
+    print("Encoding positions (bottleneck codes + spatial tap tokens)...")
+    codes, taps = encode_dataset(jepa, states, device, batch_size=args.encode_batch)
+    print(f"  codes: {codes.shape}  taps: {taps.shape}")
 
     evals_norm = (evals / EVAL_CLIP).clamp(-1, 1)
 
-    dataset = TensorDataset(X, evals_norm, evals)
+    dataset = TensorDataset(codes, taps, evals_norm, evals)
     n_val   = max(1, int(0.2 * len(dataset)))
     n_train = len(dataset) - n_val
     train_ds, val_ds = random_split(dataset, [n_train, n_val],
@@ -113,7 +110,6 @@ def train(args):
 
     # --- organizer ---
     organizer = EvalOrganizer(
-        input_dim=X.shape[1],
         latent_dim=args.latent_dim,
         hidden_dim=args.hidden_dim,
     ).to(device)
@@ -125,12 +121,13 @@ def train(args):
     for epoch in range(1, args.epochs + 1):
         organizer.train()
         total_loss = 0.0
-        for X_b, e_norm, e_raw in train_dl:
-            X_b    = X_b.to(device)
-            e_norm = e_norm.to(device)
-            e_raw  = e_raw.to(device)
+        for codes_b, taps_b, e_norm, e_raw in train_dl:
+            codes_b = codes_b.to(device)
+            taps_b  = taps_b.to(device)
+            e_norm  = e_norm.to(device)
+            e_raw   = e_raw.to(device)
 
-            z, pred = organizer(X_b)
+            z, pred = organizer(codes_b, taps_b)
             loss = mse(pred, e_norm) + args.rank_weight * ranking_loss(pred, e_raw)
 
             opt.zero_grad()
@@ -142,8 +139,8 @@ def train(args):
         organizer.eval()
         val_preds, val_targets = [], []
         with torch.no_grad():
-            for X_b, e_norm, _ in val_dl:
-                _, pred = organizer(X_b.to(device))
+            for codes_b, taps_b, e_norm, _ in val_dl:
+                _, pred = organizer(codes_b.to(device), taps_b.to(device))
                 val_preds.append(pred.cpu())
                 val_targets.append(e_norm)
 
@@ -162,7 +159,6 @@ def train(args):
                 "model_state_dict": organizer.state_dict(),
                 "latent_dim": args.latent_dim,
                 "hidden_dim": args.hidden_dim,
-                "input_dim":  X.shape[1],
             }, args.out)
             print(f"  → saved to {args.out}")
 

@@ -20,7 +20,6 @@ def load_models(jepa_ckpt, org_ckpt, device):
 
     org_data  = torch.load(org_ckpt, map_location=device)
     organizer = EvalOrganizer(
-        input_dim=org_data["input_dim"],
         latent_dim=org_data["latent_dim"],
         hidden_dim=org_data["hidden_dim"],
     ).to(device)
@@ -55,10 +54,11 @@ def main():
         board  = chess.Board(fen)
         tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
         with torch.no_grad():
-            taps = jepa.encoder(tensor)
-            z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=BOTTLENECK_TAU)
-            z_flat  = z.flatten(start_dim=1)
-            latent, eval_pred = organizer(z_flat)
+            tap_dict = jepa.encoder(tensor)
+            last_tap = tap_dict[max(tap_dict.keys())]  # (1, 64, 256)
+            z, _     = jepa.bottleneck(last_tap, tau=BOTTLENECK_TAU)
+            codes    = z.flatten(start_dim=1)          # (1, 8192)
+            latent, eval_pred = organizer(codes, last_tap)
             proj = (latent @ win_dir).item()
         return eval_pred.item(), proj
 
@@ -100,7 +100,7 @@ def main():
     scored = []
     for san, fen in fens_after:
         s, p = score(fen)
-        scored.append((san, -s, -p))  # negate: white just moved, now black's turn
+        scored.append((san, -s, -p))  # negate: white moved, resulting pos is black's turn
 
     scored.sort(key=lambda x: x[1], reverse=True)
     for san, s, p in scored[:8]:

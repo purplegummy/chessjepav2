@@ -66,7 +66,6 @@ predictor  = jepa.predictor
 print(f"Loading organizer from {args.organizer_ckpt}…")
 org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
 organizer = EvalOrganizer(
-    input_dim=org_ckpt["input_dim"],
     latent_dim=org_ckpt["latent_dim"],
     hidden_dim=org_ckpt["hidden_dim"],
 ).to(device)
@@ -87,10 +86,11 @@ app = Flask(
 )
 
 
-def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
+def encode_moves(board: chess.Board, moves: list[chess.Move]):
     """
-    Encode resulting positions as concat(bottleneck_codes, mean_pooled_taps): (N, 8448).
-    Bottleneck captures strategic concepts; taps capture tactical sharpness.
+    Returns (codes, taps) for all resulting positions.
+      codes: (N, 8192)    — bottleneck one-hots (strategic)
+      taps:  (N, 64, 256) — raw patch tokens (spatial/tactical)
     """
     tensors = []
     for m in moves:
@@ -99,12 +99,11 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
         tensors.append(board_to_tensor(b2).float())
     batch = torch.stack(tensors).to(device)
     with torch.no_grad():
-        taps     = encoder(batch)
-        last_tap = taps[max(taps.keys())]              # (N, 64, 256)
+        tap_dict = encoder(batch)
+        last_tap = tap_dict[max(tap_dict.keys())]      # (N, 64, 256)
         z, _     = bottleneck(last_tap, tau=BOTTLENECK_TAU)
         codes    = z.flatten(start_dim=1)              # (N, 8192)
-        pooled   = last_tap.mean(dim=1)                # (N, 256)
-    return torch.cat([codes, pooled], dim=1)           # (N, 8448)
+    return codes, last_tap
 
 
 def pick_move(board: chess.Board, top_n: int = 5):
@@ -112,10 +111,10 @@ def pick_move(board: chess.Board, top_n: int = 5):
     if not legal:
         return None, []
 
-    h = encode_moves(board, legal)          # (N, 8192)
+    codes, taps = encode_moves(board, legal)
     with torch.no_grad():
-        _, eval_pred = organizer(h)         # (N,) current-player POV
-    scores = -eval_pred                     # negate: resulting pos is opponent's turn
+        _, eval_pred = organizer(codes, taps)   # (N,) current-player POV
+    scores = -eval_pred                         # negate: resulting pos is opponent's turn
 
     ranked = sorted(zip(legal, scores.tolist()), key=lambda x: x[1], reverse=True)
 
