@@ -64,10 +64,10 @@ def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
                      win_thresh: float = 150, lose_thresh: float = -150,
                      margin: float = 2.0):
     """
-    Organizes latent space geometry by eval label:
-      - Pull winning positions together
-      - Pull losing positions together
-      - Push winning cluster away from losing cluster
+    Organizes latent space geometry by eval label.
+    Works on L2-normalized embeddings (cosine space) so margin is meaningful.
+      - Pull intra-class pairs together (centroid pull)
+      - Push inter-class pairs apart
     """
     win_mask  = evals >  win_thresh
     lose_mask = evals < lose_thresh
@@ -75,15 +75,24 @@ def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
     if win_mask.sum() < 2 or lose_mask.sum() < 2:
         return torch.tensor(0.0, device=z.device)
 
-    z_win  = z[win_mask]
-    z_lose = z[lose_mask]
+    # Normalize to unit sphere so distances are in [0, 2]
+    z_n = nn.functional.normalize(z, dim=-1)
+    z_win  = z_n[win_mask]
+    z_lose = z_n[lose_mask]
 
-    # Only push inter-class pairs apart — no pull (pull causes collapse)
+    # Pull: minimize variance around each centroid
+    pull_win  = (z_win  - z_win.mean(0)).pow(2).sum(1).mean()
+    pull_lose = (z_lose - z_lose.mean(0)).pow(2).sum(1).mean()
+    pull = pull_win + pull_lose
+
+    # Push: inter-class pairs should be > margin apart
     n = min(len(z_win), len(z_lose), 64)
     idx_w = torch.randperm(len(z_win),  device=z.device)[:n]
     idx_l = torch.randperm(len(z_lose), device=z.device)[:n]
     dists = torch.norm(z_win[idx_w] - z_lose[idx_l], dim=1)
-    return torch.clamp(margin - dists, min=0).mean()
+    push = torch.clamp(margin - dists, min=0).mean()
+
+    return pull + push
 
 
 def train(args):
@@ -154,7 +163,7 @@ def train(args):
             e_raw  = e_raw.to(device)
 
             z, pred, e_pooled = organizer(X_b)
-            loss = contrastive_loss(z, e_raw)
+            loss = contrastive_loss(z, e_raw, margin=args.margin)
 
             opt.zero_grad()
             loss.backward()
