@@ -84,8 +84,18 @@ app = Flask(
 )
 
 
+def encode_position(board: chess.Board) -> torch.Tensor:
+    """Encode a single position to organizer latent z: (1, latent_dim)."""
+    t = board_to_tensor(board).float().unsqueeze(0).to(device)
+    with torch.no_grad():
+        tap_dict = encoder(t)
+        last_tap = tap_dict[max(tap_dict.keys())]
+        z, _, _ = organizer(last_tap)
+    return z
+
+
 def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
-    """Encode resulting positions as encoder taps: (N, 64, 256) float."""
+    """Encode resulting positions to organizer latent z: (N, latent_dim)."""
     tensors = []
     for m in moves:
         b2 = board.copy()
@@ -94,16 +104,25 @@ def encode_moves(board: chess.Board, moves: list[chess.Move]) -> torch.Tensor:
     batch = torch.stack(tensors).to(device)
     with torch.no_grad():
         tap_dict = encoder(batch)
-        last_tap = tap_dict[max(tap_dict.keys())]  # (N, 64, 256)
-    return last_tap
+        last_tap = tap_dict[max(tap_dict.keys())]
+        z, _, _ = organizer(last_tap)
+    return z
 
 
 def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
-    """Score a list of moves from the current player's POV."""
-    codes = encode_moves(board, moves)
-    with torch.no_grad():
-        _, eval_pred, _ = organizer(codes)
-    return (-eval_pred).tolist()  # negate: resulting pos is opponent's turn
+    """Score moves by how much their latent delta aligns with the winning direction."""
+    val_weight = organizer.val_head.weight  # (1, latent_dim)
+
+    z_curr  = encode_position(board)     # (1, latent_dim)
+    z_nexts = encode_moves(board, moves) # (N, latent_dim)
+
+    delta = z_nexts - z_curr             # (N, latent_dim)
+
+    delta_norm  = delta      / (delta.norm(dim=-1, keepdim=True)      + 1e-8)
+    weight_norm = val_weight / (val_weight.norm(dim=-1, keepdim=True) + 1e-8)
+
+    alignment = torch.matmul(delta_norm, weight_norm.T).squeeze(-1)  # (N,)
+    return alignment.tolist()
 
 
 def negamax(board: chess.Board, depth: int) -> float:

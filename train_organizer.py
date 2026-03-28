@@ -162,6 +162,7 @@ def train(args):
 
             z, pred, struct = organizer(X_b)
             loss = (mse(pred, e_norm)
+                    + args.contrastive_lambda * contrastive_loss(z, e_raw, margin=args.margin)
                     + args.orth_lambda * organizer.orthogonal_penalty())
 
             opt.zero_grad()
@@ -228,6 +229,10 @@ if __name__ == "__main__":
     parser.add_argument("--lr",           default=1e-3, type=float)
     parser.add_argument("--orth_lambda", default=0.1, type=float,
                         help="weight for orthogonal penalty between value and structure branches")
+    parser.add_argument("--contrastive_lambda", default=1.0, type=float,
+                        help="weight for contrastive loss term")
+    parser.add_argument("--margin", default=1.5, type=float,
+                        help="contrastive margin (on normalized embeddings, max=2.0)")
     parser.add_argument("--out",                default="checkpoints/organizer.pt")
     args = parser.parse_args()
 
