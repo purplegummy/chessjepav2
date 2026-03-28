@@ -78,16 +78,12 @@ def contrastive_loss(z: torch.Tensor, evals: torch.Tensor,
     z_win  = z[win_mask]
     z_lose = z[lose_mask]
 
-    pull_win  = torch.pdist(z_win).mean()
-    pull_lose = torch.pdist(z_lose).mean()
-
+    # Only push inter-class pairs apart — no pull (pull causes collapse)
     n = min(len(z_win), len(z_lose), 64)
     idx_w = torch.randperm(len(z_win),  device=z.device)[:n]
     idx_l = torch.randperm(len(z_lose), device=z.device)[:n]
     dists = torch.norm(z_win[idx_w] - z_lose[idx_l], dim=1)
-    push  = torch.clamp(margin - dists, min=0).mean()
-
-    return pull_win + pull_lose + push
+    return torch.clamp(margin - dists, min=0).mean()
 
 
 def train(args):
