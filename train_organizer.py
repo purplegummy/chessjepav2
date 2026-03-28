@@ -221,10 +221,28 @@ def train(args):
         else:
             separation, intra_win, intra_lose = 0.0, 0.0, 0.0
 
+        # cosine similarity between val_head direction and win→lose axis
+        if len(z_win) > 0 and len(z_lose) > 0:
+            with torch.no_grad():
+                # effective direction in latent space: val_head.weight @ val_bottleneck.weight
+                val_dir = (organizer.val_head.weight @ organizer.val_bottleneck.weight)  # (1, latent_dim)
+                val_dir = val_dir.squeeze(0)
+                val_dir = val_dir / (val_dir.norm() + 1e-8)
+
+                win_c  = torch.tensor(z_win.mean(0))
+                lose_c = torch.tensor(z_lose.mean(0))
+                axis   = win_c - lose_c
+                axis   = axis / (axis.norm() + 1e-8)
+
+                head_alignment = (val_dir.cpu() * axis).sum().item()
+        else:
+            head_alignment = 0.0
+
         orth = organizer.orthogonal_penalty().item()
         val_loss = total_loss / len(train_dl)
         print(f"Epoch {epoch:3d} | loss={val_loss:.4f} | orth={orth:.4f} "
-              f"| sep={separation:.3f} | intra_win={intra_win:.3f} | intra_lose={intra_lose:.3f}")
+              f"| sep={separation:.3f} | intra_win={intra_win:.3f} | intra_lose={intra_lose:.3f} "
+              f"| head_align={head_alignment:+.3f}")
 
         # save when separation improves
         if separation > best_val:
