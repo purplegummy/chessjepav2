@@ -48,7 +48,7 @@ def main():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     jepa, organizer = load_models(args.jepa_ckpt, args.organizer_ckpt, device)
 
-    win_dir = organizer.eval_head.weight.squeeze(0)
+    win_dir = organizer.val_head.weight.squeeze(0)
     win_dir = win_dir / (win_dir.norm() + 1e-8)
 
     def score(fen):

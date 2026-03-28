@@ -11,11 +11,10 @@ class EvalOrganizer(nn.Module):
         hidden_dim: int = 512,
     ):
         super().__init__()
-        input_dim = n_patches * tap_dim  # 64 * 256 = 16384
-
         # Pre-alignment block: prepares JEPA features for the eval task
+        # Input is mean-pooled across patches: (B, tap_dim) — global board health
         self.pre_align = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(tap_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, latent_dim),
@@ -35,7 +34,7 @@ class EvalOrganizer(nn.Module):
 
     def forward(self, x: torch.Tensor):
         """x: (B, 64, 256) float — encoder taps, all patches."""
-        z = self.pre_align(x.flatten(start_dim=1))  # (B, latent_dim)
+        z = self.pre_align(x.mean(dim=1))  # global avg pool → (B, tap_dim) → (B, latent_dim)
 
         eval_pred = self.val_head(z).squeeze(-1)  # (B,)
         struct    = self.struct_head(z)            # (B, latent_dim-1)

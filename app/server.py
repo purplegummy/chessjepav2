@@ -47,23 +47,17 @@ args = parser.parse_args()
 # ─────────────────────────────────────────────────────────────────────────────
 # Models
 # ─────────────────────────────────────────────────────────────────────────────
-N_CATS         = 8
-N_CODES        = 16
-BOTTLENECK_TAU = 1e-5
-
 device = torch.device(args.device)
 
 print(f"Loading JEPA from {args.jepa_ckpt}…")
-jepa = ChessJEPA(n_cats=N_CATS, n_codes=N_CODES).to(device)
+jepa = ChessJEPA().to(device)
 ckpt = torch.load(args.jepa_ckpt, map_location=device)
 jepa.load_state_dict(ckpt["model_state_dict"])
 jepa.eval()
 for p in jepa.parameters():
     p.requires_grad_(False)
 
-encoder    = jepa.encoder
-bottleneck = jepa.bottleneck
-predictor  = jepa.predictor
+encoder = jepa.encoder
 
 print(f"Loading organizer from {args.organizer_ckpt}…")
 org_ckpt  = torch.load(args.organizer_ckpt, map_location=device)
