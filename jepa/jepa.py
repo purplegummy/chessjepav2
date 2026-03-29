@@ -48,6 +48,6 @@ class ChessJEPA(nn.Module):
 
         goal_logits = None
         if next_evals is not None:
-            goal_logits = self.goal_predictor(z_t_last, next_evals)
+            goal_logits = self.goal_predictor(z_t_last, next_evals)  # next_evals = delta_evals
 
         return pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits

@@ -26,8 +26,8 @@ def main():
 
     if "evals" not in data:
         raise ValueError("dataset has no 'evals' key")
-    if "next_evals" in data:
-        print("'next_evals' already present — nothing to do.")
+    if "next_evals" in data and "delta_evals" in data:
+        print("'next_evals' and 'delta_evals' already present — nothing to do.")
         return
 
     evals       = data["evals"].long()   # (N,)
@@ -50,9 +50,13 @@ def main():
     print(f"  {n_boundaries:,} game boundaries detected "
           f"({n_boundaries / N * 100:.2f}% of transitions — next_eval crosses game boundary at these, which is fine)")
 
-    data["next_evals"] = next_evals.to(torch.int16)
+    # delta_evals[i] = next_evals[i] - evals[i] — how much the eval changed
+    delta_evals = next_evals - evals
+
+    data["next_evals"]  = next_evals.to(torch.int16)
+    data["delta_evals"] = delta_evals.to(torch.int16)
     torch.save(data, args.dataset)
-    print(f"  Saved next_evals → {args.dataset}")
+    print(f"  Saved next_evals + delta_evals → {args.dataset}")
 
 
 if __name__ == "__main__":

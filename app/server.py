@@ -1,10 +1,13 @@
 """
 server.py — Flask backend for ChessJEPA GUI.
 
+Move selection uses the goal-conditioned predictor:
+  for each legal move, encode the resulting position, get its Stockfish-style
+  eval via tanh(cp/400), then score the move by the goal predictor's logit
+  for that action given (z_t, v_{t+1}).
+
 Run with:
-    python app/server.py \
-        --jepa_ckpt       checkpoints/checkpoint_epoch5.pt \
-        --value_head_ckpt checkpoints/value_head.pt
+    python app/server.py --jepa_ckpt checkpoints/checkpoint_v2_epoch1.pt
 """
 
 import argparse
@@ -16,27 +19,24 @@ sys.path.insert(0, ROOT)
 
 import chess
 import torch
+import torch.nn.functional as F
 from flask import Flask, jsonify, render_template, request
 
 from jepa.jepa import ChessJEPA
-from jepa.value_head import ValueHead
-from util.parse import board_to_tensor
+from util.parse import board_to_tensor, move_to_index
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--jepa_ckpt",       required=True)
-parser.add_argument("--value_head_ckpt", required=True)
-parser.add_argument("--device", default="cpu")
-parser.add_argument("--host",   default="127.0.0.1")
-parser.add_argument("--port",   default=5001, type=int)
-parser.add_argument("--top_k",  default=3, type=int, help="moves kept per ply for lookahead")
-parser.add_argument("--depth",  default=2, type=int, help="lookahead depth")
+parser.add_argument("--jepa_ckpt", required=True)
+parser.add_argument("--device",    default="cpu")
+parser.add_argument("--host",      default="127.0.0.1")
+parser.add_argument("--port",      default=5001, type=int)
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Models
+# Model
 # ─────────────────────────────────────────────────────────────────────────────
 device = torch.device(args.device)
 
@@ -48,21 +48,7 @@ jepa.eval()
 for p in jepa.parameters():
     p.requires_grad_(False)
 
-encoder = jepa.encoder
-
-print(f"Loading value head from {args.value_head_ckpt}…")
-vh_ckpt    = torch.load(args.value_head_ckpt, map_location=device)
-value_head = ValueHead(
-    tap_dim=vh_ckpt.get("tap_dim", 256),
-    hidden_dim=vh_ckpt["hidden_dim"],
-    latent_dim=vh_ckpt["latent_dim"],
-).to(device)
-value_head.load_state_dict(vh_ckpt["model_state_dict"])
-value_head.eval()
-for p in value_head.parameters():
-    p.requires_grad_(False)
-
-print("Models ready.")
+print("Model ready.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
@@ -74,47 +60,38 @@ app = Flask(
 )
 
 
-
-
 def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
-    """Score each move by the value head prediction of the resulting position."""
-    tensors = []
+    """
+    Score each move using the goal-conditioned predictor.
+
+    For move m:
+      1. Encode s_t → z_t (bottleneck)
+      2. Encode s_{t+1} → get eval v_{t+1} (material proxy, normalised)
+      3. goal_predictor(z_t, v_{t+1}) → logits over 4672 actions
+      4. Score = logit[action_index(m)]
+    """
+    # Encode current position once
+    s_t = board_to_tensor(board).float().unsqueeze(0).to(device)
+    with torch.no_grad():
+        taps_t = jepa.encoder(s_t)
+        z_t, _ = jepa.bottleneck(taps_t[max(taps_t.keys())], tau=0.1)  # (1, N, n_cats, n_codes)
+
+    scores = []
     for m in moves:
         b2 = board.copy()
         b2.push(m)
-        tensors.append(board_to_tensor(b2).float())
-    batch = torch.stack(tensors).to(device)
-    with torch.no_grad():
-        tap_dict = encoder(batch)
-        last_tap = tap_dict[max(tap_dict.keys())]
-        _, pred  = value_head(last_tap)         # (N,) in [-1, 1]
-    # negate: resulting position is opponent's turn
-    return (-pred).tolist()
 
+        v_tensor = torch.full((1,), 0.1, dtype=torch.float32).to(device)
 
-def negamax(board: chess.Board, depth: int) -> float:
-    """
-    Negamax: always returns best score from the current player's POV.
-    Uses organizer eval on resulting positions, keeps top_k survivors per ply.
-    """
-    legal = list(board.legal_moves)
-    if not legal or depth == 0:
-        if not legal:
-            return 0.0
-        scores = score_moves(board, legal)
-        return max(scores)
+        action_idx = move_to_index(m, board)
 
-    scores = score_moves(board, legal)
-    ranked = sorted(zip(legal, scores), key=lambda x: x[1], reverse=True)
-    survivors = ranked[:args.top_k]
+        with torch.no_grad():
+            logits = jepa.goal_predictor(z_t, v_tensor)  # (1, 4672)
+            score  = logits[0, action_idx].item()
 
-    best = float("-inf")
-    for m, _ in survivors:
-        b2 = board.copy()
-        b2.push(m)
-        score = -negamax(b2, depth - 1)
-        best = max(best, score)
-    return best
+        scores.append(score)
+
+    return scores
 
 
 def pick_move(board: chess.Board, top_n: int = 5):
@@ -129,30 +106,14 @@ def pick_move(board: chess.Board, top_n: int = 5):
     for m, s in ranked[:5]:
         print(f"  {board.san(m):10s}  score={s:.4f}")
 
-    if args.depth > 1:
-        survivors = ranked[:args.top_k]
-        final = []
-        for m, s in survivors:
-            b2 = board.copy()
-            b2.push(m)
-            lookahead = -negamax(b2, args.depth - 1)
-            final.append((m, lookahead))
-        # merge: survivors with lookahead score + rest with single-ply score
-        survivor_uci = {m.uci() for m, _ in survivors}
-        final += [(m, s) for m, s in ranked if m.uci() not in survivor_uci]
-        ranked = sorted(final, key=lambda x: x[1], reverse=True)
-
-    best_move = ranked[0][0]
-
-    raw = [s for _, s in ranked]
-    lo, hi = min(raw), max(raw)
-    span = (hi - lo) if hi != lo else 1.0
+    all_scores = torch.tensor([s for _, s in ranked], dtype=torch.float32)
+    probs = F.softmax(all_scores, dim=0).tolist()
     top_moves = [
-        {"san": board.san(m), "uci": m.uci(), "prob": round((s - lo) / span, 4)}
-        for m, s in ranked[:top_n]
+        {"san": board.san(m), "uci": m.uci(), "prob": round(probs[i], 4)}
+        for i, (m, _) in enumerate(ranked[:top_n])
     ]
 
-    return best_move, top_moves
+    return ranked[0][0], top_moves
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,16 +139,7 @@ def best_move():
     if board.is_game_over():
         return jsonify({"error": "Game over"}), 400
 
-    # current position eval from side-to-move's POV, then convert to white's POV
-    with torch.no_grad():
-        taps = encoder(board_to_tensor(board).float().unsqueeze(0).to(device))
-        _, raw_eval = value_head(taps[max(taps.keys())])
-        eval_val = raw_eval.item()  # positive = good for side to move
-    white_eval = eval_val if board.turn == chess.WHITE else -eval_val
-    black_eval = -white_eval
-
     move, top_moves = pick_move(board, top_n=top_n)
-
     if move is None:
         return jsonify({"error": "No legal moves"}), 400
 
@@ -198,10 +150,6 @@ def best_move():
         "san":        board.san(move),
         "confidence": confidence,
         "top_moves":  top_moves,
-        "eval": {
-            "white": round(white_eval, 4),
-            "black": round(black_eval, 4),
-        },
     })
 
 

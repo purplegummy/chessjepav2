@@ -69,7 +69,7 @@ def calc_loss(pred_logits, target_indices, bottleneck_logits,
     return total, l_pred, l_entropy, l_inv, l_goal
 
 
-def validate(model, dataloader, criterion, device, has_next_evals, lambdas):
+def validate(model, dataloader, criterion, device, has_delta_evals, lambdas):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
@@ -77,10 +77,10 @@ def validate(model, dataloader, criterion, device, has_next_evals, lambdas):
             board_t    = data["state"].to(device)
             board_t1   = data["next_state"].to(device)
             actions    = data["action"].to(device)
-            next_evals = data["next_eval"].to(device) if has_next_evals else None
+            delta_evals = data["delta_eval"].to(device) if has_delta_evals else None
 
             pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits = \
-                model(board_t, board_t1, actions, tau=1.0, next_evals=next_evals)
+                model(board_t, board_t1, actions, tau=1.0, delta_evals=delta_evals)
 
             loss, *_ = calc_loss(
                 pred_logits, target_indices, bottleneck_logits,
@@ -104,14 +104,14 @@ def main(args):
     model = ChessJEPA(dropout=args.dropout).to(device)
     log_model_info(model, device)
 
-    # Check whether dataset has next_evals
+    # Check whether dataset has delta_evals
     raw = torch.load(args.data, map_location="cpu", weights_only=True)
-    has_next_evals = "next_evals" in raw
+    has_delta_evals = "delta_evals" in raw
     del raw
-    if has_next_evals:
-        logging.info("next_evals found — goal-conditioned predictor enabled")
+    if has_delta_evals:
+        logging.info("delta_evals found — goal-conditioned predictor enabled")
     else:
-        logging.info("next_evals not found — goal predictor disabled (run util/add_next_evals.py)")
+        logging.info("delta_evals not found — goal predictor disabled (run util/add_delta_evals.py)")
 
     dataset = ChessDataset(args.data)
     if args.data_frac < 1.0:
@@ -161,13 +161,13 @@ def main(args):
             board_t  = data["state"].to(device)
             board_t1 = data["next_state"].to(device)
             actions  = data["action"].to(device)
-            next_evals = data["next_eval"].to(device) if has_next_evals else None
+            delta_evals = data["delta_eval"].to(device) if has_delta_evals else None
 
             tau = max(0.1, 1.0 - 0.9 * (global_step / total_steps))
 
             optimizer.zero_grad()
             pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits = \
-                model(board_t, board_t1, actions, tau=tau, next_evals=next_evals)
+                model(board_t, board_t1, actions, tau=tau, delta_evals=delta_evals)
 
             loss, l_pred, l_entropy, l_inv, l_goal = calc_loss(
                 pred_logits, target_indices, bottleneck_logits,
@@ -189,7 +189,7 @@ def main(args):
                 log_step(epoch, batch_idx, loss.item(), l_pred.item(),
                          l_entropy.item(), l_inv.item(), l_goal_val)
 
-        val_loss = validate(model, val_loader, criterion, device, has_next_evals, lambdas)
+        val_loss = validate(model, val_loader, criterion, device, has_delta_evals, lambdas)
         logging.info(f"epoch {epoch:>3} | val_loss {val_loss:.4f}")
         save_checkpoint(model, optimizer, epoch, args.out.replace(".pt", f"_epoch{epoch}.pt"))
 

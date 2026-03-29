@@ -7,7 +7,8 @@ class ChessDataset(torch.utils.data.Dataset):
         self.data["states"]      = self.data["states"].float()
         self.data["next_states"] = self.data["next_states"].float()
         self.data["actions"]     = self.data["actions"].long()
-        self.has_next_evals = "next_evals" in self.data
+        self.has_next_evals  = "next_evals"  in self.data
+        self.has_delta_evals = "delta_evals" in self.data
         self.has_evals      = "evals"      in self.data
 
     def __len__(self) -> int:
@@ -23,5 +24,7 @@ class ChessDataset(torch.utils.data.Dataset):
         if self.has_evals:
             item["eval"] = self.data["evals"][idx]            # int16 scalar
         if self.has_next_evals:
-            item["next_eval"] = self.data["next_evals"][idx]  # int16 scalar
+            item["next_eval"]  = self.data["next_evals"][idx]   # int16 scalar
+        if self.has_delta_evals:
+            item["delta_eval"] = self.data["delta_evals"][idx]  # int16 scalar
         return item
