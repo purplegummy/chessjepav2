@@ -1,0 +1,12 @@
+  capture/quiet         within=-0.0309±0.3056  between=-0.0055±0.2836  separation=-0.0253
+  piece type            within=+0.0411±0.3098  between=+0.0178±0.2922  separation=+0.0232
+  side                  within=-0.0115±0.2988  between=-0.0147±0.2987  separation=+0.0031
+  castle                within=+0.0233±0.2903  between=+0.0000±0.0000  separation=+0.0233
+  top moves             within=+0.1219±0.3344  between=+0.0159±0.2862  separation=+0.1060
+  capture/quiet         alignment=+0.0304±0.2588
+  piece type            alignment=+0.0415±0.2591
+  side                  alignment=+0.0344±0.2721
+  top moves             alignment=+0.0513±0.2495
+  capture/quiet         capture: 5.389±1.935 (n=1807)  |  quiet: 6.964±1.795 (n=6193)
+  piece type            bishop: 4.983±1.368 (n=115)  |  king: 5.919±1.393 (n=35)  |  knight: 4.491±1.497 (n=301)  |  pawn: 3.917±1.517 (n=451)  |  queen: 5.463±1.356 (n=62)  |  rook: 7.186±0.562 (n=6)  |  unknown: 6.911±1.786 (n=7030)
+  castle                non-castle: 6.608±1.943 (n=8000)

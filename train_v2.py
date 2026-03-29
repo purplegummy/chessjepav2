@@ -11,8 +11,8 @@ logging.basicConfig(
 )
 
 LAMBDA_ENTROPY = 0.05
-LAMBDA_INV     = 0.1
-LAMBDA_GOAL    = 0.1
+LAMBDA_INV     = 0.5
+LAMBDA_GOAL    = 0.2
 
 
 def log_step(epoch, batch_idx, loss, l_pred, l_entropy, l_inv, l_goal):
