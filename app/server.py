@@ -1,13 +1,16 @@
 """
 server.py — Flask backend for ChessJEPA GUI.
 
-Move selection uses the goal-conditioned predictor:
-  for each legal move, encode the resulting position, get its Stockfish-style
-  eval via tanh(cp/400), then score the move by the goal predictor's logit
-  for that action given (z_t, v_{t+1}).
+Move selection pipeline:
+  1. Encode s_t → z_t (bottleneck)
+  2. DeltaPredictor(z_t, delta=+1.0) → z_goal  (imagined next state)
+  3. InversePredictor(z_t, z_goal) → action logits
+  4. Pick highest logit legal move
 
 Run with:
-    python app/server.py --jepa_ckpt checkpoints/checkpoint_v2_epoch1.pt
+    python app/server.py \
+        --jepa_ckpt       checkpoints/checkpoint_v2_epoch8.pt \
+        --delta_pred_ckpt checkpoints/delta_pred_epoch0.pt
 """
 
 import argparse
@@ -23,20 +26,24 @@ import torch.nn.functional as F
 from flask import Flask, jsonify, render_template, request
 
 from jepa.jepa import ChessJEPA
+from jepa.delta_predictor import DeltaPredictor
 from util.parse import board_to_tensor, move_to_index
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--jepa_ckpt", required=True)
-parser.add_argument("--device",    default="cpu")
-parser.add_argument("--host",      default="127.0.0.1")
-parser.add_argument("--port",      default=5001, type=int)
+parser.add_argument("--jepa_ckpt",       required=True)
+parser.add_argument("--delta_pred_ckpt", required=True)
+parser.add_argument("--delta",           default=1.0,          type=float,
+                    help="Target eval delta passed to DeltaPredictor (raw centipawns)")
+parser.add_argument("--device",          default="cpu")
+parser.add_argument("--host",            default="127.0.0.1")
+parser.add_argument("--port",            default=5001,         type=int)
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model
+# Models
 # ─────────────────────────────────────────────────────────────────────────────
 device = torch.device(args.device)
 
@@ -48,7 +55,15 @@ jepa.eval()
 for p in jepa.parameters():
     p.requires_grad_(False)
 
-print("Model ready.")
+print(f"Loading DeltaPredictor from {args.delta_pred_ckpt}…")
+delta_pred = DeltaPredictor().to(device)
+dp_ckpt = torch.load(args.delta_pred_ckpt, map_location=device)
+delta_pred.load_state_dict(dp_ckpt["delta_pred_state_dict"])
+delta_pred.eval()
+for p in delta_pred.parameters():
+    p.requires_grad_(False)
+
+print("Models ready.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
@@ -62,34 +77,24 @@ app = Flask(
 
 def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
     """
-    Score each move using the goal-conditioned predictor.
-
-    For move m:
-      1. Encode s_t → z_t (bottleneck)
-      2. Encode s_{t+1} → get eval v_{t+1} (material proxy, normalised)
-      3. goal_predictor(z_t, v_{t+1}) → logits over 4672 actions
-      4. Score = logit[action_index(m)]
+    1. Encode s_t → z_t
+    2. DeltaPredictor(z_t, delta) → z_goal
+    3. InversePredictor(z_t, z_goal) → logits over 4672 actions
+    4. Return logit for each legal move's action index
     """
-    # Encode current position once
     s_t = board_to_tensor(board).float().unsqueeze(0).to(device)
+    delta = torch.tensor([args.delta], dtype=torch.float32).to(device)
+
     with torch.no_grad():
         taps_t = jepa.encoder(s_t)
         z_t, _ = jepa.bottleneck(taps_t[max(taps_t.keys())], tau=0.1)  # (1, N, n_cats, n_codes)
+        z_goal = delta_pred(z_t, delta)                                  # (1, N, n_cats, n_codes)
+        logits = jepa.inv_predictor(z_t, z_goal)                        # (1, 4672)
 
     scores = []
     for m in moves:
-        b2 = board.copy()
-        b2.push(m)
-
-        v_tensor = torch.full((1,), 0.1, dtype=torch.float32).to(device)
-
         action_idx = move_to_index(m, board)
-
-        with torch.no_grad():
-            logits = jepa.goal_predictor(z_t, v_tensor)  # (1, 4672)
-            score  = logits[0, action_idx].item()
-
-        scores.append(score)
+        scores.append(logits[0, action_idx].item())
 
     return scores
 
@@ -143,12 +148,10 @@ def best_move():
     if move is None:
         return jsonify({"error": "No legal moves"}), 400
 
-    confidence = top_moves[0]["prob"] if top_moves else 0.0
-
     return jsonify({
         "move":       move.uci(),
         "san":        board.san(move),
-        "confidence": confidence,
+        "confidence": top_moves[0]["prob"] if top_moves else 0.0,
         "top_moves":  top_moves,
     })
 

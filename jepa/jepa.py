@@ -5,6 +5,7 @@ from jepa.predictor import Predictor
 from jepa.categoricalbottleneck import CategoricalBottleneck
 from jepa.inverse_predictor import InversePredictor
 from jepa.goal_predictor import GoalConditionedPredictor
+from jepa.delta_predictor import DeltaPredictor
 
 class ChessJEPA(nn.Module):
     def __init__(self, n_cats=8, n_codes=16, embed_dim=256, tap_layers=(2, 4, 6), dropout=0.0):
@@ -13,8 +14,9 @@ class ChessJEPA(nn.Module):
         self.encoder    = Encoder(tap_layers=tap_layers, dropout=dropout)
         self.bottleneck = CategoricalBottleneck(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim)
         self.predictor  = Predictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
-        self.inv_predictor = InversePredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
-        self.goal_predictor = GoalConditionedPredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
+        self.inv_predictor   = InversePredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
+        self.goal_predictor  = GoalConditionedPredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
+        self.delta_predictor = DeltaPredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
     def forward(self, board_t, board_t1, a, tau=1.0, delta_evals=None):
         """
         Returns:
@@ -47,7 +49,9 @@ class ChessJEPA(nn.Module):
         inv_logits  = self.inv_predictor(z_t_last, z_t1_last)
 
         goal_logits = None
+        z_t1_pred   = None
         if delta_evals is not None:
-            goal_logits = self.goal_predictor(z_t_last, delta_evals)  # delta_evals = delta_evals
+            goal_logits = self.goal_predictor(z_t_last, delta_evals)
+            z_t1_pred   = self.delta_predictor(z_t_last, delta_evals)
 
-        return pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits
+        return pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits, z_t1_pred, z_t1_last
