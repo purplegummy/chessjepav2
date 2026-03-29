@@ -12,15 +12,14 @@ logging.basicConfig(
 
 LAMBDA_ENTROPY = 0.05
 LAMBDA_INV     = 0.5
-LAMBDA_GOAL    = 0.2
 LAMBDA_DELTA   = 1.0
 
 
-def log_step(epoch, batch_idx, loss, l_pred, l_entropy, l_inv, l_goal, l_delta):
+def log_step(epoch, batch_idx, loss, l_pred, l_entropy, l_inv, l_delta):
     logging.info(
         f"epoch {epoch:>3} | batch {batch_idx:>6} | "
         f"loss {loss:.4f} | l_pred {l_pred:.4f} | l_entropy {l_entropy:.4f} | "
-        f"l_inv {l_inv:.4f} | l_goal {l_goal:.4f} | l_delta {l_delta:.4f}"
+        f"l_inv {l_inv:.4f} | l_delta {l_delta:.4f}"
     )
 
 
@@ -34,10 +33,10 @@ def save_checkpoint(model, optimizer, epoch, out_path):
 
 
 def calc_loss(pred_logits, target_indices, bottleneck_logits,
-              inv_logits, goal_logits, actions, criterion,
+              inv_logits, actions, criterion,
               z_t1_pred=None, z_t1_target=None,
               lambda_entropy=LAMBDA_ENTROPY, lambda_inv=LAMBDA_INV,
-              lambda_goal=LAMBDA_GOAL, lambda_delta=LAMBDA_DELTA):
+              lambda_delta=LAMBDA_DELTA):
 
     # JEPA prediction loss (averaged over tap levels)
     l_pred = 0.0
@@ -61,9 +60,6 @@ def calc_loss(pred_logits, target_indices, bottleneck_logits,
     # Inverse predictor loss
     l_inv = criterion(inv_logits, actions)
 
-    # Goal-conditioned predictor loss (optional)
-    l_goal = criterion(goal_logits, actions) if goal_logits is not None else torch.tensor(0.0)
-
     # Delta predictor loss — MSE between predicted and actual z_{t+1}
     l_delta = torch.nn.functional.mse_loss(z_t1_pred, z_t1_target.detach()) \
               if z_t1_pred is not None else torch.tensor(0.0)
@@ -71,10 +67,9 @@ def calc_loss(pred_logits, target_indices, bottleneck_logits,
     total = (l_pred
              + lambda_entropy * l_entropy
              + lambda_inv     * l_inv
-             + lambda_goal    * l_goal
              + lambda_delta   * l_delta)
 
-    return total, l_pred, l_entropy, l_inv, l_goal, l_delta
+    return total, l_pred, l_entropy, l_inv, l_delta
 
 
 def validate(model, dataloader, criterion, device, has_delta_evals, lambdas):
@@ -87,12 +82,12 @@ def validate(model, dataloader, criterion, device, has_delta_evals, lambdas):
             actions    = data["action"].to(device)
             delta_evals = data["delta_eval"].to(device) if has_delta_evals else None
 
-            pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits, z_t1_pred, z_t1_last = \
+            pred_logits, target_indices, bottleneck_logits, inv_logits, z_t1_pred, z_t1_last = \
                 model(board_t, board_t1, actions, tau=1.0, delta_evals=delta_evals)
 
             loss, *_ = calc_loss(
                 pred_logits, target_indices, bottleneck_logits,
-                inv_logits, goal_logits, actions, criterion,
+                inv_logits, actions, criterion,
                 z_t1_pred=z_t1_pred, z_t1_target=z_t1_last, **lambdas,
             )
             total_loss += loss.item()
@@ -139,7 +134,7 @@ def main(args):
 
     optimizer    = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion    = torch.nn.CrossEntropyLoss()
-    lambdas      = dict(lambda_entropy=args.lambda_entropy, lambda_inv=args.lambda_inv, lambda_goal=args.lambda_goal, lambda_delta=args.lambda_delta)
+    lambdas      = dict(lambda_entropy=args.lambda_entropy, lambda_inv=args.lambda_inv, lambda_delta=args.lambda_delta)
     logging.info(f"lambdas: {lambdas}")
     total_steps  = (args.total_epochs or args.epochs) * (train_size // args.batch)
     global_step  = 0
@@ -175,12 +170,12 @@ def main(args):
             tau = max(0.1, 1.0 - 0.9 * (global_step / total_steps))
 
             optimizer.zero_grad()
-            pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits, z_t1_pred, z_t1_last = \
+            pred_logits, target_indices, bottleneck_logits, inv_logits, z_t1_pred, z_t1_last = \
                 model(board_t, board_t1, actions, tau=tau, delta_evals=delta_evals)
 
-            loss, l_pred, l_entropy, l_inv, l_goal, l_delta = calc_loss(
+            loss, l_pred, l_entropy, l_inv, l_delta = calc_loss(
                 pred_logits, target_indices, bottleneck_logits,
-                inv_logits, goal_logits, actions, criterion,
+                inv_logits, actions, criterion,
                 z_t1_pred=z_t1_pred, z_t1_target=z_t1_last, **lambdas,
             )
 
@@ -195,10 +190,9 @@ def main(args):
             global_step += 1
 
             if batch_idx % 100 == 0:
-                l_goal_val  = l_goal.item()  if torch.is_tensor(l_goal)  else l_goal
                 l_delta_val = l_delta.item() if torch.is_tensor(l_delta) else l_delta
                 log_step(epoch, batch_idx, loss.item(), l_pred.item(),
-                         l_entropy.item(), l_inv.item(), l_goal_val, l_delta_val)
+                         l_entropy.item(), l_inv.item(), l_delta_val)
 
         val_loss = validate(model, val_loader, criterion, device, has_delta_evals, lambdas)
         logging.info(f"epoch {epoch:>3} | val_loss {val_loss:.4f}")
@@ -222,7 +216,6 @@ if __name__ == "__main__":
                         help="Fraction of dataset to use, e.g. 0.1 for 10%%")
     parser.add_argument("--lambda-entropy", default=0.05,  type=float)
     parser.add_argument("--lambda-inv",     default=0.5,   type=float)
-    parser.add_argument("--lambda-goal",    default=0.2,   type=float)
     parser.add_argument("--lambda-delta",   default=1.0,   type=float)
     args = parser.parse_args()
     main(args)

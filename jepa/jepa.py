@@ -48,10 +48,8 @@ class ChessJEPA(nn.Module):
 
         inv_logits  = self.inv_predictor(z_t_last, z_t1_last)
 
-        goal_logits = None
-        z_t1_pred   = None
+        z_t1_pred = None
         if delta_evals is not None:
-            goal_logits = self.goal_predictor(z_t_last, delta_evals)
-            z_t1_pred   = self.delta_predictor(z_t_last, delta_evals)
+            z_t1_pred = self.delta_predictor(z_t_last, delta_evals)
 
-        return pred_logits, target_indices, bottleneck_logits, inv_logits, goal_logits, z_t1_pred, z_t1_last
+        return pred_logits, target_indices, bottleneck_logits, inv_logits, z_t1_pred, z_t1_last
