@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusBadge   = document.getElementById('statusBadge');
     const thinkingDot   = document.getElementById('thinkingDot');
     const bestMoveSan   = document.getElementById('bestMoveSan');
+    const evalDisplay   = document.getElementById('evalDisplay');
     const confidenceBar = document.getElementById('confidenceBar');
     const confidencePct = document.getElementById('confidencePct');
     const topMovesList  = document.getElementById('topMovesList');
@@ -197,6 +198,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateAnalysisPanel(data) {
         bestMoveSan.textContent = data.san || data.move || '—';
 
+        if (data.eval) {
+            const w = (data.eval.white >= 0 ? '+' : '') + data.eval.white.toFixed(2);
+            const b = (data.eval.black >= 0 ? '+' : '') + data.eval.black.toFixed(2);
+            evalDisplay.textContent = `${w} / ${b}`;
+        }
+
         const pct = ((data.confidence || 0) * 100).toFixed(1);
         confidenceBar.style.width = `${pct}%`;
         confidencePct.textContent = `${pct}%`;
@@ -220,6 +227,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function clearAnalysisPanel() {
         bestMoveSan.textContent   = '—';
+        evalDisplay.textContent   = '— / —';
         confidenceBar.style.width = '0%';
         confidencePct.textContent = '—';
         topMovesList.innerHTML    = '';

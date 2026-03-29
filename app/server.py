@@ -178,6 +178,14 @@ def best_move():
     if board.is_game_over():
         return jsonify({"error": "Game over"}), 400
 
+    # current position eval from side-to-move's POV, then convert to white's POV
+    with torch.no_grad():
+        taps = encoder(board_to_tensor(board).float().unsqueeze(0).to(device))
+        _, raw_eval = value_head(taps[max(taps.keys())])
+        eval_val = raw_eval.item()  # positive = good for side to move
+    white_eval = eval_val if board.turn == chess.WHITE else -eval_val
+    black_eval = -white_eval
+
     move, top_moves = pick_move(board, top_n=top_n)
 
     if move is None:
@@ -190,6 +198,10 @@ def best_move():
         "san":        board.san(move),
         "confidence": confidence,
         "top_moves":  top_moves,
+        "eval": {
+            "white": round(white_eval, 4),
+            "black": round(black_eval, 4),
+        },
     })
 
 
