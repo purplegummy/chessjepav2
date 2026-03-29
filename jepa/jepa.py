@@ -4,7 +4,6 @@ from jepa.encoder import Encoder
 from jepa.predictor import Predictor
 from jepa.categoricalbottleneck import CategoricalBottleneck
 from jepa.inverse_predictor import InversePredictor
-from jepa.goal_predictor import GoalConditionedPredictor
 from jepa.delta_predictor import DeltaPredictor
 
 class ChessJEPA(nn.Module):
@@ -15,7 +14,6 @@ class ChessJEPA(nn.Module):
         self.bottleneck = CategoricalBottleneck(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim)
         self.predictor  = Predictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
         self.inv_predictor   = InversePredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
-        self.goal_predictor  = GoalConditionedPredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
         self.delta_predictor = DeltaPredictor(n_cats=n_cats, n_codes=n_codes, embed_dim=embed_dim, dropout=dropout)
     def forward(self, board_t, board_t1, a, tau=1.0, delta_evals=None):
         """
