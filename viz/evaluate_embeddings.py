@@ -9,7 +9,6 @@ import torch
 import numpy as np
 
 from jepa.jepa import ChessJEPA
-from jepa.value_head import ValueHead
 from util.parse import board_to_tensor
 
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
@@ -58,13 +57,8 @@ def load_and_encode(
     num_samples: int,
     stockfish_path: str | None = None,
     depth: int = 12,
-    value_head: ValueHead | None = None,
 ):
-    """
-    Reads FENs from CSV, encodes each position, returns embeddings + metadata.
-    If value_head is provided, embeddings are the value_head's latent vectors (latent_dim,).
-    Otherwise, embeddings are the JEPA bottleneck category indices (512,).
-    """
+    """Reads FENs from CSV, encodes each position, returns embeddings + metadata."""
     model.eval()
     embeddings = []
     metadata   = []
@@ -83,13 +77,7 @@ def load_and_encode(
 
                 with torch.no_grad():
                     taps = model.encoder(tensor)
-                    last_tap = taps[max(taps.keys())]  # (1, 64, 256)
-
-                    if value_head is not None:
-                        h, _ = value_head(last_tap)  # (1, latent_dim)
-                        h = h.squeeze(0).cpu()
-                    else:
-                        h = last_tap.mean(dim=1).squeeze(0).cpu()  # (256,)
+                    h = taps[max(taps.keys())].mean(dim=1).squeeze(0).cpu()  # (256,)
 
                 eval_cp = stockfish_eval_cp(board, engine, depth) if engine else 0
 
@@ -149,7 +137,7 @@ LANDMARK_POSITIONS = [
 ]
 
 
-def encode_landmarks(model: ChessJEPA, device, value_head=None):
+def encode_landmarks(model: ChessJEPA, device):
     """Encode hardcoded landmark positions, return (embeddings, metadata)."""
     model.eval()
     embeddings, metadata = [], []
@@ -157,13 +145,8 @@ def encode_landmarks(model: ChessJEPA, device, value_head=None):
         board  = chess.Board(lm["fen"])
         tensor = board_to_tensor(board).float().unsqueeze(0).to(device)
         with torch.no_grad():
-            taps     = model.encoder(tensor)
-            last_tap = taps[max(taps.keys())]
-            if value_head is not None:
-                h, _ = value_head(last_tap)
-                h = h.squeeze(0).cpu()
-            else:
-                h = last_tap.mean(dim=1).squeeze(0).cpu()
+            taps = model.encoder(tensor)
+            h = taps[max(taps.keys())].mean(dim=1).squeeze(0).cpu()
         embeddings.append(h)
         metadata.append({
             "fen":           lm["fen"],
@@ -423,8 +406,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fens",           default="data/fen_analysis.csv")
     parser.add_argument("--jepa_ckpt",      default="checkpoints/checkpoint_epoch5.pt")
-    parser.add_argument("--value_head_ckpt", default=None,
-                        help="path to value_head checkpoint — plots value_head latent space instead of JEPA bottleneck")
     parser.add_argument("--num_samples",    default=200, type=int)
     parser.add_argument("--out",            default="umap.html")
     parser.add_argument("--stockfish",      default="/opt/homebrew/bin/stockfish")
@@ -435,26 +416,11 @@ if __name__ == "__main__":
     model = ChessJEPA().to(device)
     model = load_checkpoint(model, args.jepa_ckpt, device)
 
-    value_head = None
-    if args.value_head_ckpt:
-        org_ckpt  = torch.load(args.value_head_ckpt, map_location=device)
-        value_head = ValueHead(
-            tap_dim=org_ckpt.get("tap_dim", 256),
-            hidden_dim=org_ckpt["hidden_dim"],
-            latent_dim=org_ckpt["latent_dim"],
-        ).to(device)
-        value_head.load_state_dict(org_ckpt["model_state_dict"])
-        value_head.eval()
-        print(f"Using value_head latent space (dim={org_ckpt['latent_dim']})")
-    else:
-        print("Using JEPA bottleneck indices (dim=512)")
-
     embeddings, metadata = load_and_encode(
         args.fens, model, device, args.num_samples, args.stockfish, args.depth,
-        value_head=value_head,
     )
 
-    lm_embeddings, lm_metadata = encode_landmarks(model, device, value_head=value_head)
+    lm_embeddings, lm_metadata = encode_landmarks(model, device)
     embeddings += lm_embeddings
     metadata   += lm_metadata
 

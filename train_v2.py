@@ -10,7 +10,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-# Loss weights
 LAMBDA_ENTROPY = 0.05
 LAMBDA_INV     = 0.1
 LAMBDA_GOAL    = 0.1
@@ -34,7 +33,8 @@ def save_checkpoint(model, optimizer, epoch, out_path):
 
 
 def calc_loss(pred_logits, target_indices, bottleneck_logits,
-              inv_logits, goal_logits, actions, criterion):
+              inv_logits, goal_logits, actions, criterion,
+              lambda_entropy=LAMBDA_ENTROPY, lambda_inv=LAMBDA_INV, lambda_goal=LAMBDA_GOAL):
 
     # JEPA prediction loss (averaged over tap levels)
     l_pred = 0.0
@@ -62,14 +62,14 @@ def calc_loss(pred_logits, target_indices, bottleneck_logits,
     l_goal = criterion(goal_logits, actions) if goal_logits is not None else torch.tensor(0.0)
 
     total = (l_pred
-             + LAMBDA_ENTROPY * l_entropy
-             + LAMBDA_INV     * l_inv
-             + LAMBDA_GOAL    * l_goal)
+             + lambda_entropy * l_entropy
+             + lambda_inv     * l_inv
+             + lambda_goal    * l_goal)
 
     return total, l_pred, l_entropy, l_inv, l_goal
 
 
-def validate(model, dataloader, criterion, device, has_next_evals):
+def validate(model, dataloader, criterion, device, has_next_evals, lambdas):
     model.eval()
     total_loss = 0.0
     with torch.no_grad():
@@ -84,7 +84,7 @@ def validate(model, dataloader, criterion, device, has_next_evals):
 
             loss, *_ = calc_loss(
                 pred_logits, target_indices, bottleneck_logits,
-                inv_logits, goal_logits, actions, criterion,
+                inv_logits, goal_logits, actions, criterion, **lambdas,
             )
             total_loss += loss.item()
     return total_loss / len(dataloader)
@@ -130,6 +130,8 @@ def main(args):
 
     optimizer    = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion    = torch.nn.CrossEntropyLoss()
+    lambdas      = dict(lambda_entropy=args.lambda_entropy, lambda_inv=args.lambda_inv, lambda_goal=args.lambda_goal)
+    logging.info(f"lambdas: {lambdas}")
     total_steps  = (args.total_epochs or args.epochs) * (train_size // args.batch)
     global_step  = 0
     start_epoch  = 0
@@ -169,7 +171,7 @@ def main(args):
 
             loss, l_pred, l_entropy, l_inv, l_goal = calc_loss(
                 pred_logits, target_indices, bottleneck_logits,
-                inv_logits, goal_logits, actions, criterion,
+                inv_logits, goal_logits, actions, criterion, **lambdas,
             )
 
             loss.backward()
@@ -187,7 +189,7 @@ def main(args):
                 log_step(epoch, batch_idx, loss.item(), l_pred.item(),
                          l_entropy.item(), l_inv.item(), l_goal_val)
 
-        val_loss = validate(model, val_loader, criterion, device, has_next_evals)
+        val_loss = validate(model, val_loader, criterion, device, has_next_evals, lambdas)
         logging.info(f"epoch {epoch:>3} | val_loss {val_loss:.4f}")
         save_checkpoint(model, optimizer, epoch, args.out.replace(".pt", f"_epoch{epoch}.pt"))
 
@@ -205,7 +207,10 @@ if __name__ == "__main__":
     parser.add_argument("--total-epochs", default=None,                       type=int,
                         help="Total intended training epochs for scheduler horizon (defaults to --epochs)")
     parser.add_argument("--resume",       default=None,                       type=str)
-    parser.add_argument("--data-frac",    default=1.0,                        type=float,
+    parser.add_argument("--data-frac",      default=1.0,   type=float,
                         help="Fraction of dataset to use, e.g. 0.1 for 10%%")
+    parser.add_argument("--lambda-entropy", default=0.05,  type=float)
+    parser.add_argument("--lambda-inv",     default=0.1,   type=float)
+    parser.add_argument("--lambda-goal",    default=0.1,   type=float)
     args = parser.parse_args()
     main(args)
