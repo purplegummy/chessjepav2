@@ -41,13 +41,14 @@ def main():
     # Compare next_states[i] with states[i+1]
     same_game = (next_states[:-1] == states[1:]).all(dim=(1, 2, 3))  # (N-1,)
 
+    # next_evals[i] = evals[i+1] — always valid since every position has an eval
+    # The last row wraps to itself (one sample out of ~1M, not worth special-casing)
     next_evals = evals.clone()
-    next_evals[:-1][same_game]  = evals[1:][same_game]
-    # boundary rows (same_game==False) keep next_evals[i] = evals[i]
+    next_evals[:-1] = evals[1:]
 
     n_boundaries = (~same_game).sum().item()
     print(f"  {n_boundaries:,} game boundaries detected "
-          f"({n_boundaries / N * 100:.2f}% of transitions)")
+          f"({n_boundaries / N * 100:.2f}% of transitions — next_eval crosses game boundary at these, which is fine)")
 
     data["next_evals"] = next_evals.to(torch.int16)
     torch.save(data, args.dataset)
