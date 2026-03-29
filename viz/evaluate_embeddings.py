@@ -407,7 +407,7 @@ if __name__ == "__main__":
     parser.add_argument("--fens",           default="data/fen_analysis.csv")
     parser.add_argument("--jepa_ckpt",      default="checkpoints/checkpoint_epoch5.pt")
     parser.add_argument("--num_samples",    default=200, type=int)
-    parser.add_argument("--out",            default="umap.html")
+    parser.add_argument("--out",            default="viz/umap.html")
     parser.add_argument("--stockfish",      default="/opt/homebrew/bin/stockfish")
     parser.add_argument("--depth",          default=12, type=int)
     args = parser.parse_args()
