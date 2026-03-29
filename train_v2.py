@@ -138,13 +138,15 @@ def main(args):
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        for group in optimizer.param_groups:
+            group.setdefault("initial_lr", args.lr)
         start_epoch = ckpt["epoch"] + 1
         global_step = start_epoch * (train_size // args.batch)
         logging.info(f"Resumed from {args.resume} at epoch {start_epoch}, step {global_step}")
 
     warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
         optimizer, start_factor=1e-8, end_factor=1.0, total_iters=args.warmup,
-        last_epoch=min(global_step, args.warmup),
+        last_epoch=min(global_step, args.warmup) - 1,
     )
     cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps - args.warmup, eta_min=1e-6,
