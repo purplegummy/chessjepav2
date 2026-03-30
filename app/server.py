@@ -3,14 +3,12 @@ server.py — Flask backend for ChessJEPA GUI.
 
 Move selection pipeline:
   1. Encode s_t → z_t (bottleneck)
-  2. DeltaPredictor(z_t, delta=+1.0) → z_goal  (imagined next state)
-  3. InversePredictor(z_t, z_goal) → action logits
+  2. delta_predictor(z_t, delta) → z_goal  (imagined next state)
+  3. inv_predictor(z_t, z_goal)  → action logits
   4. Pick highest logit legal move
 
 Run with:
-    python app/server.py \
-        --jepa_ckpt       checkpoints/checkpoint_v2_epoch8.pt \
-        --delta_pred_ckpt checkpoints/delta_pred_epoch0.pt
+    python app/server.py --jepa_ckpt checkpoints/checkpoint_v3_epoch0.pt
 """
 
 import argparse
@@ -26,16 +24,14 @@ import torch.nn.functional as F
 from flask import Flask, jsonify, render_template, request
 
 from jepa.jepa import ChessJEPA
-from jepa.delta_predictor import DeltaPredictor
 from util.parse import board_to_tensor, move_to_index
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Args
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument("--jepa_ckpt",       required=True)
-parser.add_argument("--delta_pred_ckpt", required=True)
-parser.add_argument("--delta",           default=1.0,          type=float,
+parser.add_argument("--jepa_ckpt", required=True)
+parser.add_argument("--delta",     default=1.0,   type=float,
                     help="Target eval delta passed to DeltaPredictor (raw centipawns)")
 parser.add_argument("--device",          default="cpu")
 parser.add_argument("--host",            default="127.0.0.1")
@@ -55,15 +51,7 @@ jepa.eval()
 for p in jepa.parameters():
     p.requires_grad_(False)
 
-print(f"Loading DeltaPredictor from {args.delta_pred_ckpt}…")
-delta_pred = DeltaPredictor().to(device)
-dp_ckpt = torch.load(args.delta_pred_ckpt, map_location=device)
-delta_pred.load_state_dict(dp_ckpt["delta_pred_state_dict"])
-delta_pred.eval()
-for p in delta_pred.parameters():
-    p.requires_grad_(False)
-
-print("Models ready.")
+print("Model ready.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app
@@ -88,7 +76,7 @@ def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
     with torch.no_grad():
         taps_t = jepa.encoder(s_t)
         z_t, _ = jepa.bottleneck(taps_t[max(taps_t.keys())], tau=0.1)  # (1, N, n_cats, n_codes)
-        z_goal = delta_pred(z_t, delta)                                  # (1, N, n_cats, n_codes)
+        z_goal = jepa.delta_predictor(z_t, delta)                        # (1, N, n_cats, n_codes)
         logits = jepa.inv_predictor(z_t, z_goal)                        # (1, 4672)
 
     scores = []
