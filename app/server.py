@@ -114,11 +114,10 @@ def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
         z_t_exp = z_t.expand(M, -1, -1, -1)                            # (M, N, n_cats, n_codes)
 
         pred_logits = jepa.predictor(z_t_exp, action_indices)           # (M, N, n_cats, n_codes)
-        z_t1_hat = torch.softmax(pred_logits, dim=-1)
+        z_t1_hat = torch.softmax(pred_logits / 0.1, dim=-1)            # sharp soft, matches bottleneck tau=0.1
 
         if value_head is not None:
             scores = value_head(z_t1_hat).tolist()  # (M,) — white's perspective
-            # if it's black's turn, black wants to minimise white's value
             if board.turn == chess.BLACK:
                 scores = [-s for s in scores]
         else:
@@ -141,7 +140,7 @@ def pick_move(board: chess.Board, top_n: int = 5):
         print(f"  {board.san(m):10s}  score={s:.4f}")
 
     all_scores = torch.tensor([s for _, s in ranked], dtype=torch.float32)
-    probs = F.softmax(all_scores, dim=0).tolist()
+    probs = F.softmax(all_scores * 10.0, dim=0).tolist()
     top_moves = [
         {"san": board.san(m), "uci": m.uci(), "prob": round(probs[i], 4)}
         for i, (m, _) in enumerate(ranked[:top_n])
@@ -201,10 +200,10 @@ def eval_position():
     if value_head is not None:
         s_t = board_to_tensor(board).float().unsqueeze(0).to(device)
         with torch.no_grad():
-            taps = jepa.encoder(s_t)
-            z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=0.1)
-            jepa_val = value_head(z).item()  # normalized, white's perspective
-        result["jepa_cp"] = round(jepa_val * 3000, 1)   # back to centipawns (EVAL_CLIP=3000)
+            taps    = jepa.encoder(s_t)
+            z, _    = jepa.bottleneck(taps[max(taps.keys())], tau=0.1)
+            jepa_val = value_head(z).item()
+        result["jepa_cp"] = round(jepa_val * 3000, 1)
     else:
         result["jepa_cp"] = None
 

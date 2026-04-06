@@ -27,6 +27,12 @@ def normalize_eval(evals: torch.Tensor) -> torch.Tensor:
     return evals.float().clamp(-EVAL_CLIP, EVAL_CLIP) / EVAL_CLIP
 
 
+def weighted_mse(preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    # Weight by abs(target) so large eval positions matter more
+    weights = 1.0 + targets.abs() * 3.0
+    return ((preds - targets) ** 2 * weights).mean()
+
+
 def save_checkpoint(head, optimizer, epoch, out_path):
     torch.save({
         "model_state_dict":     head.state_dict(),
@@ -39,7 +45,6 @@ def save_checkpoint(head, optimizer, epoch, out_path):
 def validate(head, jepa, dataloader, device):
     head.eval()
     total_loss = 0.0
-    criterion = torch.nn.MSELoss()
     with torch.no_grad():
         for data in dataloader:
             states = data["state"].to(device)
@@ -48,7 +53,7 @@ def validate(head, jepa, dataloader, device):
             taps   = jepa.encoder(states)
             z, _   = jepa.bottleneck(taps[max(taps.keys())], tau=0.1)
             preds  = head(z)
-            total_loss += criterion(preds, evals).item()
+            total_loss += weighted_mse(preds, evals).item()
 
     return total_loss / len(dataloader)
 
@@ -84,7 +89,6 @@ def main(args):
     val_loader   = DataLoader(val_ds,   batch_size=args.batch, shuffle=False, num_workers=4, pin_memory=True)
 
     optimizer   = torch.optim.Adam(head.parameters(), lr=args.lr)
-    criterion   = torch.nn.MSELoss()
     total_steps = args.epochs * (train_size // args.batch)
     global_step = 0
     start_epoch = 0
@@ -120,7 +124,7 @@ def main(args):
 
             optimizer.zero_grad()
             preds = head(z)
-            loss  = criterion(preds, evals)
+            loss  = weighted_mse(preds, evals)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
             optimizer.step()
