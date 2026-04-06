@@ -96,10 +96,11 @@ app = Flask(
 def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
     """
     For each legal move:
-      1. Encode s_t → z_t
+      1. Encode s_t → z_t via bottleneck
       2. predictor(z_t, action) → z_t1_hat
-      3. inv_predictor(z_t, z_t1_hat) → logits over 4672 actions
-      4. Score = logit at that move's action index
+      3. value_head(z_t1_hat) → predicted value of next state
+      4. Negate if it's black's turn (value head is from white's perspective)
+    Falls back to inv_predictor scoring if no value head is loaded.
     """
     s_t = board_to_tensor(board).float().unsqueeze(0).to(device)
     action_indices = torch.tensor(
@@ -110,19 +111,20 @@ def score_moves(board: chess.Board, moves: list[chess.Move]) -> list[float]:
     with torch.no_grad():
         taps_t = jepa.encoder(s_t)
         z_t, _ = jepa.bottleneck(taps_t[max(taps_t.keys())], tau=0.1)  # (1, N, n_cats, n_codes)
+        z_t_exp = z_t.expand(M, -1, -1, -1)                            # (M, N, n_cats, n_codes)
 
-        # Expand z_t to batch over all moves
-        z_t_exp = z_t.expand(M, -1, -1, -1)  # (M, N, n_cats, n_codes)
-
-        # Predict next state for each action
-        pred_logits = jepa.predictor(z_t_exp, action_indices)  # (M, N, n_cats, n_codes)
+        pred_logits = jepa.predictor(z_t_exp, action_indices)           # (M, N, n_cats, n_codes)
         z_t1_hat = torch.softmax(pred_logits, dim=-1)
 
-        # Score each (z_t, z_t1_hat) pair with the inverse predictor
-        inv_logits = jepa.inv_predictor(z_t_exp, z_t1_hat)  # (M, 4672)
+        if value_head is not None:
+            scores = value_head(z_t1_hat).tolist()  # (M,) — white's perspective
+            # if it's black's turn, black wants to minimise white's value
+            if board.turn == chess.BLACK:
+                scores = [-s for s in scores]
+        else:
+            inv_logits = jepa.inv_predictor(z_t_exp, z_t1_hat)         # (M, 4672)
+            scores = inv_logits[torch.arange(M), action_indices].tolist()
 
-    # Score for move i = logit at its own action index
-    scores = inv_logits[torch.arange(M), action_indices].tolist()
     return scores
 
 
@@ -200,8 +202,8 @@ def eval_position():
         s_t = board_to_tensor(board).float().unsqueeze(0).to(device)
         with torch.no_grad():
             taps = jepa.encoder(s_t)
-            jepa_val = value_head(taps[max(taps.keys())]).item()  # [-1, 1]
-        # jepa_val is from white's perspective (normalized centipawns / 1000)
+            z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=0.1)
+            jepa_val = value_head(z).item()  # normalized, white's perspective
         result["jepa_cp"] = round(jepa_val * 3000, 1)   # back to centipawns (EVAL_CLIP=3000)
     else:
         result["jepa_cp"] = None

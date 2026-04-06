@@ -36,7 +36,7 @@ def save_checkpoint(head, optimizer, epoch, out_path):
     logging.info(f"Saved checkpoint → {out_path}")
 
 
-def validate(head, encoder, dataloader, device):
+def validate(head, jepa, dataloader, device):
     head.eval()
     total_loss = 0.0
     criterion = torch.nn.MSELoss()
@@ -45,8 +45,9 @@ def validate(head, encoder, dataloader, device):
             states = data["state"].to(device)
             evals  = normalize_eval(data["eval"]).to(device)
 
-            taps  = encoder(states)
-            preds = head(taps[max(taps.keys())])
+            taps   = jepa.encoder(states)
+            z, _   = jepa.bottleneck(taps[max(taps.keys())], tau=0.1)
+            preds  = head(z)
             total_loss += criterion(preds, evals).item()
 
     return total_loss / len(dataloader)
@@ -62,7 +63,6 @@ def main(args):
     jepa.eval()
     for p in jepa.parameters():
         p.requires_grad_(False)
-    encoder = jepa.encoder
 
     head = ValueHead().to(device)
     logging.info(f"ValueHead params: {sum(p.numel() for p in head.parameters()):,}")
@@ -115,10 +115,11 @@ def main(args):
             evals  = normalize_eval(data["eval"]).to(device)
 
             with torch.no_grad():
-                taps = encoder(states)
+                taps = jepa.encoder(states)
+                z, _ = jepa.bottleneck(taps[max(taps.keys())], tau=0.1)
 
             optimizer.zero_grad()
-            preds = head(taps[max(taps.keys())])
+            preds = head(z)
             loss  = criterion(preds, evals)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
@@ -135,7 +136,7 @@ def main(args):
                     f"epoch {epoch:>3} | batch {batch_idx:>6} | loss {loss.item():.4f}"
                 )
 
-        val_loss = validate(head, encoder, val_loader, device)
+        val_loss = validate(head, jepa, val_loader, device)
         logging.info(f"epoch {epoch:>3} | val_loss {val_loss:.4f}")
         save_checkpoint(head, optimizer, epoch, args.out.replace(".pt", f"_epoch{epoch}.pt"))
 
