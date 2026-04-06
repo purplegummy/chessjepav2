@@ -17,13 +17,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const statusBadge   = document.getElementById('statusBadge');
     const thinkingDot   = document.getElementById('thinkingDot');
     const bestMoveSan   = document.getElementById('bestMoveSan');
-    const evalDisplay   = document.getElementById('evalDisplay');
     const confidenceBar = document.getElementById('confidenceBar');
     const confidencePct = document.getElementById('confidencePct');
     const topMovesList  = document.getElementById('topMovesList');
     const moveHistory   = document.getElementById('moveHistory');
     const fenInput      = document.getElementById('fenInput');
     const boardPanel    = document.querySelector('.board-panel');
+    const jepaCpLabel   = document.getElementById('jepaCpLabel');
+    const jepaBar       = document.getElementById('jepaBar');
+    const sfCpLabel     = document.getElementById('sfCpLabel');
+    const sfBar         = document.getElementById('sfBar');
 
     // ── Chessboard.js config ─────────────────────────────────────────────────
     function buildBoardConfig() {
@@ -138,11 +141,48 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ── UI updates ───────────────────────────────────────────────────────────
+    function cpToBarWidth(cp) {
+        // sigmoid-like mapping: 0 cp → 50%, ±500 cp → ~85%/15%, clamp to [5,95]
+        const pct = 50 + 50 * (2 / (1 + Math.exp(-cp / 300)) - 1);
+        return Math.max(5, Math.min(95, pct));
+    }
+
+    function formatCp(cp, mate) {
+        if (mate !== null && mate !== undefined) return mate > 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
+        if (cp === null || cp === undefined) return '—';
+        return (cp >= 0 ? '+' : '') + (cp / 100).toFixed(2);
+    }
+
+    async function updateEvalBars() {
+        try {
+            const resp = await fetch('/api/eval', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ fen: game.fen() }),
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+
+            if (data.jepa_cp !== null && data.jepa_cp !== undefined) {
+                jepaCpLabel.textContent = formatCp(data.jepa_cp, null);
+                jepaBar.style.width = cpToBarWidth(data.jepa_cp) + '%';
+            }
+            if (data.sf_cp !== null || data.sf_mate !== null) {
+                sfCpLabel.textContent = formatCp(data.sf_cp, data.sf_mate);
+                const barCp = data.sf_cp !== null ? data.sf_cp : (data.sf_mate > 0 ? 9999 : -9999);
+                sfBar.style.width = cpToBarWidth(barCp) + '%';
+            }
+        } catch (e) {
+            console.warn('eval fetch failed', e);
+        }
+    }
+
     function updateAfterMove() {
         updateStatus();
         updateMoveHistory();
         fenInput.value = game.fen();
         highlightAiMove();
+        if (!game.game_over()) updateEvalBars();
     }
 
     function updateStatus() {
@@ -198,12 +238,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function updateAnalysisPanel(data) {
         bestMoveSan.textContent = data.san || data.move || '—';
 
-        if (data.eval) {
-            const w = (data.eval.white >= 0 ? '+' : '') + data.eval.white.toFixed(2);
-            const b = (data.eval.black >= 0 ? '+' : '') + data.eval.black.toFixed(2);
-            evalDisplay.textContent = `${w} / ${b}`;
-        }
-
         const pct = ((data.confidence || 0) * 100).toFixed(1);
         confidenceBar.style.width = `${pct}%`;
         confidencePct.textContent = `${pct}%`;
@@ -227,10 +261,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function clearAnalysisPanel() {
         bestMoveSan.textContent   = '—';
-        evalDisplay.textContent   = '— / —';
         confidenceBar.style.width = '0%';
         confidencePct.textContent = '—';
         topMovesList.innerHTML    = '';
+        jepaCpLabel.textContent   = '—';
+        sfCpLabel.textContent     = '—';
+        jepaBar.style.width       = '50%';
+        sfBar.style.width         = '50%';
     }
 
     function updateMoveHistory() {
