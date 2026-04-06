@@ -20,7 +20,7 @@ from util.chessdataset import ChessDataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 
-EVAL_CLIP = 1000.0  # centipawns
+EVAL_CLIP = 3000.0  # centipawns
 
 
 def normalize_eval(evals: torch.Tensor) -> torch.Tensor:

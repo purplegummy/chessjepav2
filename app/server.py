@@ -202,7 +202,7 @@ def eval_position():
             taps = jepa.encoder(s_t)
             jepa_val = value_head(taps[max(taps.keys())]).item()  # [-1, 1]
         # jepa_val is from white's perspective (normalized centipawns / 1000)
-        result["jepa_cp"] = round(jepa_val * 1000, 1)   # back to centipawns
+        result["jepa_cp"] = round(jepa_val * 3000, 1)   # back to centipawns (EVAL_CLIP=3000)
     else:
         result["jepa_cp"] = None
 
